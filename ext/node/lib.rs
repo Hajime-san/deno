@@ -179,12 +179,32 @@ fn parse_env_content(content: &str) -> HashMap<String, String> {
 
   let raw = content.as_bytes();
   let mut filtered = Vec::new();
-  let mut text = if raw.contains(&CHAR_CR) {
+  let mut saw_cr = false;
+  let mut text = {
     // Handle windows newlines "\r\n": remove "\r" and keep only "\n".
-    filtered.extend(raw.iter().copied().filter(|c| *c != CHAR_CR));
-    trim_spaces_slice(&filtered)
-  } else {
-    trim_spaces_slice(raw)
+    let mut i = 0;
+    while i < raw.len() {
+      if raw[i] == CHAR_CR {
+        saw_cr = true;
+        filtered = Vec::with_capacity(raw.len() - 1);
+        filtered.extend_from_slice(&raw[..i]);
+        i += 1;
+        while i < raw.len() {
+          let c = raw[i];
+          if c != CHAR_CR {
+            filtered.push(c);
+          }
+          i += 1;
+        }
+        break;
+      }
+      i += 1;
+    }
+    if saw_cr {
+      trim_spaces_slice(&filtered)
+    } else {
+      trim_spaces_slice(raw)
+    }
   };
 
   while !text.is_empty() {
