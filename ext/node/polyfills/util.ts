@@ -49,6 +49,7 @@ import {
   validateString,
 } from "ext:deno_node/internal/validators.mjs";
 import { parseArgs } from "ext:deno_node/internal/util/parse_args/parse_args.js";
+import { parseEnv } from "ext:deno_node/internal/util/parse_env.ts";
 import * as abortSignal from "ext:deno_web/03_abort_signal.js";
 import { ERR_INVALID_ARG_TYPE } from "ext:deno_node/internal/errors.ts";
 
@@ -65,6 +66,7 @@ export {
   formatWithOptions,
   inspect,
   parseArgs,
+  parseEnv,
   promisify,
   stripVTControlCharacters,
   styleText,
@@ -327,6 +329,7 @@ export default {
   deprecate,
   callbackify,
   parseArgs,
+  parseEnv,
   promisify,
   inherits,
   types,
