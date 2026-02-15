@@ -123,7 +123,15 @@ fn op_node_load_env_file(
       Some("process.loadEnvFile"),
     )
     .map_err(DotEnvLoadErr::Permission)?;
-
+  // FIXME: The implementation of dotenvy is not Node.js compatible.
+  //
+  // % deno eval "import * as process from 'node:process'; process.loadEnvFile('valid.env');"
+  // error: Uncaught (in promise) Error: Error parsing line: '`    backticks    `', error at line index: 5
+  //     at Module.loadEnvFile (node:process:580:10)
+  //     at file:///Users/hajime_masutani/repository/deno/$deno$eval.mts:1:50
+  //
+  // ref:
+  // https://github.com/denoland/node_test/blob/170b25ab9080b9d58d21b582fbf28ee5676b8387/test/fixtures/dotenv/valid.env
   dotenvy::from_filename(path).map_err(DotEnvLoadErr::DotEnv)?;
 
   Ok(())
@@ -301,7 +309,8 @@ fn parse_env_content(content: &str) -> HashMap<String, String> {
           let mut i = 0;
           while i < slice.len() {
             let c = slice[i];
-            if c == CHAR_BSLASH && i + 1 < slice.len() && slice[i + 1] == CHAR_N {
+            if c == CHAR_BSLASH && i + 1 < slice.len() && slice[i + 1] == CHAR_N
+            {
               out.push(CHAR_NL);
               i += 2;
               continue;

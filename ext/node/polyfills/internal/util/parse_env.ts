@@ -103,7 +103,9 @@ function parseContent(content: string): Record<string, string> {
 
     // Handle quoted values (single quotes, double quotes, backticks)
     const quote = StringPrototypeCharCodeAt(text, 0);
-    if (quote === CHAR_SQUOTE || quote === CHAR_DQUOTE || quote === CHAR_BQUOTE) {
+    if (
+      quote === CHAR_SQUOTE || quote === CHAR_DQUOTE || quote === CHAR_BQUOTE
+    ) {
       const closingQuote = findChar(text, quote, 1);
 
       if (closingQuote === -1) {
