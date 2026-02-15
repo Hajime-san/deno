@@ -1,5 +1,4 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
-// Copyright Node.js contributors. All rights reserved. MIT License.
 
 #![deny(clippy::print_stderr)]
 #![deny(clippy::print_stdout)]
@@ -178,15 +177,14 @@ fn op_node_parse_env<'s>(
 fn parse_env_content(content: &str) -> HashMap<String, String> {
   let mut env = HashMap::new();
 
-  let mut text = {
+  let raw = content.as_bytes();
+  let mut filtered = Vec::new();
+  let mut text = if raw.contains(&CHAR_CR) {
     // Handle windows newlines "\r\n": remove "\r" and keep only "\n".
-    let mut out = Vec::with_capacity(content.len());
-    for &c in content.as_bytes() {
-      if c != CHAR_CR {
-        out.push(c);
-      }
-    }
-    trim_spaces(&out)
+    filtered.extend(raw.iter().copied().filter(|c| *c != CHAR_CR));
+    trim_spaces_slice(&filtered)
+  } else {
+    trim_spaces_slice(raw)
   };
 
   while !text.is_empty() {
@@ -194,16 +192,16 @@ fn parse_env_content(content: &str) -> HashMap<String, String> {
 
     // Skip empty lines and comments.
     if first == CHAR_NL || first == CHAR_HASH {
-      if let Some(newline) = find_char(&text, CHAR_NL, 0) {
-        text = text[newline + 1..].to_vec();
+      if let Some(newline) = find_char(text, CHAR_NL, 0) {
+        text = &text[newline + 1..];
       } else {
-        text.clear();
+        text = &[];
       }
       continue;
     }
 
     // Find the next equals sign or newline in a single pass.
-    let equal_or_newline = match {
+    let equal_or_newline = {
       let mut index = None;
       let mut i = 0;
       while i < text.len() {
@@ -214,28 +212,28 @@ fn parse_env_content(content: &str) -> HashMap<String, String> {
         }
         i += 1;
       }
-      index
-    } {
-      Some(index) => index,
-      None => break,
+      match index {
+        Some(index) => index,
+        None => break,
+      }
     };
 
     // If we found a newline before equals, the line is invalid.
     if text[equal_or_newline] == CHAR_NL {
-      text = trim_spaces(&text[equal_or_newline + 1..]);
+      text = trim_spaces_slice(&text[equal_or_newline + 1..]);
       continue;
     }
 
-    let mut key = trim_spaces(&text[..equal_or_newline]);
-    text = text[equal_or_newline + 1..].to_vec();
+    let mut key = trim_spaces_slice(&text[..equal_or_newline]);
+    text = &text[equal_or_newline + 1..];
 
     if text.is_empty() || text[0] == CHAR_NL {
-      let key_string = String::from_utf8_lossy(&key).into_owned();
+      let key_string = String::from_utf8_lossy(key).into_owned();
       env.insert(key_string, String::new());
       continue;
     }
 
-    text = trim_spaces(&text);
+    text = trim_spaces_slice(text);
 
     if key.is_empty() {
       continue;
@@ -253,10 +251,10 @@ fn parse_env_content(content: &str) -> HashMap<String, String> {
     {
       // Trim spaces after removing export prefix to handle cases like:
       // export   FOO=bar
-      key = trim_spaces(&key[7..]);
+      key = trim_spaces_slice(&key[7..]);
     }
 
-    let key_string = String::from_utf8_lossy(&key).into_owned();
+    let key_string = String::from_utf8_lossy(key).into_owned();
 
     if text.is_empty() {
       env.insert(key_string, String::new());
@@ -265,9 +263,20 @@ fn parse_env_content(content: &str) -> HashMap<String, String> {
 
     // Expand new line if \n it's inside double quotes.
     if text[0] == CHAR_DQUOTE {
-      if let Some(closing) = find_char(&text, CHAR_DQUOTE, 1) {
-        let value = {
-          let slice = &text[1..closing];
+      if let Some(closing) = find_char(text, CHAR_DQUOTE, 1) {
+        let slice = &text[1..closing];
+        let mut needs_unescape = false;
+        let mut i = 0;
+        while i + 1 < slice.len() {
+          if slice[i] == CHAR_BSLASH && slice[i + 1] == CHAR_N {
+            needs_unescape = true;
+            break;
+          }
+          i += 1;
+        }
+        let value_string = if !needs_unescape {
+          String::from_utf8_lossy(slice).into_owned()
+        } else {
           let mut out = Vec::with_capacity(slice.len());
           let mut i = 0;
           while i < slice.len() {
@@ -280,14 +289,14 @@ fn parse_env_content(content: &str) -> HashMap<String, String> {
             out.push(c);
             i += 1;
           }
-          out
+          String::from_utf8_lossy(&out).into_owned()
         };
-        env.insert(key_string, String::from_utf8_lossy(&value).into_owned());
+        env.insert(key_string, value_string);
 
-        if let Some(newline) = find_char(&text, CHAR_NL, closing + 1) {
-          text = text[newline + 1..].to_vec();
+        if let Some(newline) = find_char(text, CHAR_NL, closing + 1) {
+          text = &text[newline + 1..];
         } else {
-          text.clear();
+          text = &[];
         }
         continue;
       }
@@ -296,61 +305,61 @@ fn parse_env_content(content: &str) -> HashMap<String, String> {
     // Handle quoted values (single quotes, double quotes, backticks).
     let quote = text[0];
     if quote == CHAR_SQUOTE || quote == CHAR_DQUOTE || quote == CHAR_BQUOTE {
-      if let Some(closing) = find_char(&text, quote, 1) {
-        let value = text[1..closing].to_vec();
-        env.insert(key_string, String::from_utf8_lossy(&value).into_owned());
+      if let Some(closing) = find_char(text, quote, 1) {
+        let value = &text[1..closing];
+        env.insert(key_string, String::from_utf8_lossy(value).into_owned());
 
-        if let Some(newline) = find_char(&text, CHAR_NL, closing + 1) {
-          text = text[newline + 1..].to_vec();
+        if let Some(newline) = find_char(text, CHAR_NL, closing + 1) {
+          text = &text[newline + 1..];
         } else {
-          text.clear();
+          text = &[];
         }
         continue;
       } else {
         // If the closing quote is not found, take the entire line as the value.
-        if let Some(newline) = find_char(&text, CHAR_NL, 0) {
-          let value = text[..newline].to_vec();
-          env.insert(key_string, String::from_utf8_lossy(&value).into_owned());
-          text = text[newline + 1..].to_vec();
+        if let Some(newline) = find_char(text, CHAR_NL, 0) {
+          let value = &text[..newline];
+          env.insert(key_string, String::from_utf8_lossy(value).into_owned());
+          text = &text[newline + 1..];
         } else {
-          env.insert(key_string, String::from_utf8_lossy(&text).into_owned());
+          env.insert(key_string, String::from_utf8_lossy(text).into_owned());
           break;
         }
       }
     } else {
-      if let Some(newline) = find_char(&text, CHAR_NL, 0) {
-        let mut value = text[..newline].to_vec();
-        if let Some(hash) = find_char(&value, CHAR_HASH, 0) {
-          value = value[..hash].to_vec();
+      if let Some(newline) = find_char(text, CHAR_NL, 0) {
+        let mut value = &text[..newline];
+        if let Some(hash) = find_char(value, CHAR_HASH, 0) {
+          value = &value[..hash];
         }
-        let value = trim_spaces(&value);
-        env.insert(key_string, String::from_utf8_lossy(&value).into_owned());
-        text = text[newline + 1..].to_vec();
+        let value = trim_spaces_slice(value);
+        env.insert(key_string, String::from_utf8_lossy(value).into_owned());
+        text = &text[newline + 1..];
       } else {
         let mut value = text;
-        if let Some(hash) = find_char(&value, CHAR_HASH, 0) {
-          value = value[..hash].to_vec();
+        if let Some(hash) = find_char(value, CHAR_HASH, 0) {
+          value = &value[..hash];
         }
-        let value = trim_spaces(&value);
-        env.insert(key_string, String::from_utf8_lossy(&value).into_owned());
-        text = Vec::new();
+        let value = trim_spaces_slice(value);
+        env.insert(key_string, String::from_utf8_lossy(value).into_owned());
+        text = &[];
       }
     }
 
-    text = trim_spaces(&text);
+    text = trim_spaces_slice(text);
   }
 
   env
 }
 
-fn trim_spaces(input: &[u8]) -> Vec<u8> {
+fn trim_spaces_slice(input: &[u8]) -> &[u8] {
   if input.is_empty() {
-    return Vec::new();
+    return input;
   }
   let mut start = 0;
-  let mut end = input.len().saturating_sub(1);
+  let mut end = input.len();
 
-  while start <= end {
+  while start < end {
     let c = input[start];
     if c != CHAR_SPACE && c != CHAR_TAB && c != CHAR_NL {
       break;
@@ -358,22 +367,15 @@ fn trim_spaces(input: &[u8]) -> Vec<u8> {
     start += 1;
   }
 
-  while end >= start {
-    let c = input[end];
+  while end > start {
+    let c = input[end - 1];
     if c != CHAR_SPACE && c != CHAR_TAB && c != CHAR_NL {
-      break;
-    }
-    if end == 0 {
       break;
     }
     end -= 1;
   }
 
-  if end < start {
-    return Vec::new();
-  }
-
-  input[start..=end].to_vec()
+  &input[start..end]
 }
 
 fn find_char(input: &[u8], char_code: u8, from: usize) -> Option<usize> {
