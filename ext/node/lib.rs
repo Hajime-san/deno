@@ -314,49 +314,48 @@ fn parse_env_content(content: &str) -> HashMap<String, String> {
 
     // Expand new line if \n it's inside double quotes
     // Example: EXPAND_NEWLINES = 'expand\nnew\nlines'
-    if text[0] == CHAR_DQUOTE {
-      if let Some(closing) = find_char(text, CHAR_DQUOTE, 1) {
-        let slice = &text[1..closing];
-        let mut needs_unescape = false;
+    if text[0] == CHAR_DQUOTE
+      && let Some(closing) = find_char(text, CHAR_DQUOTE, 1)
+    {
+      let slice = &text[1..closing];
+      let mut needs_unescape = false;
+      let mut i = 0;
+      while i + 1 < slice.len() {
+        if slice[i] == CHAR_BSLASH && slice[i + 1] == CHAR_N {
+          needs_unescape = true;
+          break;
+        }
+        i += 1;
+      }
+      let value_string = if !needs_unescape {
+        String::from_utf8_lossy(slice).into_owned()
+      } else {
+        let mut out = Vec::with_capacity(slice.len());
         let mut i = 0;
-        while i + 1 < slice.len() {
-          if slice[i] == CHAR_BSLASH && slice[i + 1] == CHAR_N {
-            needs_unescape = true;
-            break;
+        // Replace \n with actual newlines in double-quoted strings
+        while i < slice.len() {
+          let c = slice[i];
+          if c == CHAR_BSLASH && i + 1 < slice.len() && slice[i + 1] == CHAR_N {
+            out.push(CHAR_NL);
+            i += 2;
+            continue;
           }
+          out.push(c);
           i += 1;
         }
-        let value_string = if !needs_unescape {
-          String::from_utf8_lossy(slice).into_owned()
-        } else {
-          let mut out = Vec::with_capacity(slice.len());
-          let mut i = 0;
-          // Replace \n with actual newlines in double-quoted strings
-          while i < slice.len() {
-            let c = slice[i];
-            if c == CHAR_BSLASH && i + 1 < slice.len() && slice[i + 1] == CHAR_N
-            {
-              out.push(CHAR_NL);
-              i += 2;
-              continue;
-            }
-            out.push(c);
-            i += 1;
-          }
-          String::from_utf8_lossy(&out).into_owned()
-        };
-        env.insert(key_string, value_string);
+        String::from_utf8_lossy(&out).into_owned()
+      };
+      env.insert(key_string, value_string);
 
-        if let Some(newline) = find_char(text, CHAR_NL, closing + 1) {
-          text = &text[newline + 1..];
-        } else {
-          // In case the last line is a single key/value pair
-          // Example: KEY=VALUE (without a newline at the EOF)
-          text = &[];
-        }
-        // No valid data here, skip to next line
-        continue;
+      if let Some(newline) = find_char(text, CHAR_NL, closing + 1) {
+        text = &text[newline + 1..];
+      } else {
+        // In case the last line is a single key/value pair
+        // Example: KEY=VALUE (without a newline at the EOF)
+        text = &[];
       }
+      // No valid data here, skip to next line
+      continue;
     }
 
     // Handle quoted values (single quotes, double quotes, backticks)
