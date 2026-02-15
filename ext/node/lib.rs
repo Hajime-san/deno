@@ -187,6 +187,8 @@ fn op_node_parse_env<'s>(
   obj
 }
 
+/// Ported from:
+/// https://github.com/nodejs/node/blob/9cc7fcc26dece769d9ffa06c453f0171311b01f8/src/node_dotenv.cc#L138-L315
 fn parse_env_content(content: &str) -> HashMap<String, String> {
   let mut env = HashMap::new();
 
@@ -194,7 +196,7 @@ fn parse_env_content(content: &str) -> HashMap<String, String> {
   let mut filtered = Vec::new();
   let mut saw_cr = false;
   let mut text = {
-    // Handle windows newlines "\r\n": remove "\r" and keep only "\n".
+    // Handle windows newlines "\r\n": remove "\r" and keep only "\n"
     let mut i = 0;
     while i < raw.len() {
       if raw[i] == CHAR_CR {
@@ -223,17 +225,23 @@ fn parse_env_content(content: &str) -> HashMap<String, String> {
   while !text.is_empty() {
     let first = text[0];
 
-    // Skip empty lines and comments.
+    // Skip empty lines and comments
+    // Check if the first character of the content is a newline or a hash
     if first == CHAR_NL || first == CHAR_HASH {
+      // Remove everything up to and including the newline character
       if let Some(newline) = find_char(text, CHAR_NL, 0) {
         text = &text[newline + 1..];
       } else {
+        // If no newline is found, clear the content
         text = &[];
       }
+      // Skip the remaining code in the loop and continue with the next
+      // iteration.
       continue;
     }
 
     // Find the next equals sign or newline in a single pass.
+    // This optimizes the search by avoiding multiple iterations.
     let equal_or_newline = {
       let mut index = None;
       let mut i = 0;
@@ -251,15 +259,17 @@ fn parse_env_content(content: &str) -> HashMap<String, String> {
       }
     };
 
-    // If we found a newline before equals, the line is invalid.
+    // If we found nothing or found a newline before equals, the line is invalid
     if text[equal_or_newline] == CHAR_NL {
       text = trim_spaces_slice(&text[equal_or_newline + 1..]);
       continue;
     }
 
+    // We found an equals sign, extract the key
     let mut key = trim_spaces_slice(&text[..equal_or_newline]);
     text = &text[equal_or_newline + 1..];
 
+    // If the value is not present (e.g. KEY=) set it to an empty string
     if text.is_empty() || text[0] == CHAR_NL {
       let key_string = String::from_utf8_lossy(key).into_owned();
       env.insert(key_string, String::new());
@@ -268,11 +278,16 @@ fn parse_env_content(content: &str) -> HashMap<String, String> {
 
     text = trim_spaces_slice(text);
 
+    // Skip lines with empty keys after trimming spaces.
+    // Examples of invalid keys that would be skipped:
+    //   =value
+    //   "   "=value
     if key.is_empty() {
       continue;
     }
 
     // Remove export prefix from key and ensure proper spacing.
+    // Example: export FOO=bar -> FOO=bar
     if key.len() >= 7
       && key[0] == b'e'
       && key[1] == b'x'
@@ -289,12 +304,16 @@ fn parse_env_content(content: &str) -> HashMap<String, String> {
 
     let key_string = String::from_utf8_lossy(key).into_owned();
 
+    // SAFETY: Content is guaranteed to have at least one character
+    // In case the last line is a single key without value
+    // Example: KEY= (without a newline at the EOF)
     if text.is_empty() {
       env.insert(key_string, String::new());
       break;
     }
 
-    // Expand new line if \n it's inside double quotes.
+    // Expand new line if \n it's inside double quotes
+    // Example: EXPAND_NEWLINES = 'expand\nnew\nlines'
     if text[0] == CHAR_DQUOTE {
       if let Some(closing) = find_char(text, CHAR_DQUOTE, 1) {
         let slice = &text[1..closing];
@@ -312,6 +331,7 @@ fn parse_env_content(content: &str) -> HashMap<String, String> {
         } else {
           let mut out = Vec::with_capacity(slice.len());
           let mut i = 0;
+          // Replace \n with actual newlines in double-quoted strings
           while i < slice.len() {
             let c = slice[i];
             if c == CHAR_BSLASH && i + 1 < slice.len() && slice[i + 1] == CHAR_N
@@ -330,16 +350,20 @@ fn parse_env_content(content: &str) -> HashMap<String, String> {
         if let Some(newline) = find_char(text, CHAR_NL, closing + 1) {
           text = &text[newline + 1..];
         } else {
+          // In case the last line is a single key/value pair
+          // Example: KEY=VALUE (without a newline at the EOF)
           text = &[];
         }
+        // No valid data here, skip to next line
         continue;
       }
     }
 
-    // Handle quoted values (single quotes, double quotes, backticks).
+    // Handle quoted values (single quotes, double quotes, backticks)
     let quote = text[0];
     if quote == CHAR_SQUOTE || quote == CHAR_DQUOTE || quote == CHAR_BQUOTE {
       if let Some(closing) = find_char(text, quote, 1) {
+        // Found closing quote - take content between quotes
         let value = &text[1..closing];
         env.insert(key_string, String::from_utf8_lossy(value).into_owned());
 
@@ -348,21 +372,32 @@ fn parse_env_content(content: &str) -> HashMap<String, String> {
         } else {
           text = &[];
         }
+        // No valid data here, skip to next line
         continue;
       } else {
-        // If the closing quote is not found, take the entire line as the value.
+        // Check if the closing quote is not found
+        // Example: KEY="value
+        // Check if newline exists. If it does, take the entire line as the value
+        // Example: KEY="value\nKEY2=value2
+        // The value pair should be `"value`
         if let Some(newline) = find_char(text, CHAR_NL, 0) {
           let value = &text[..newline];
           env.insert(key_string, String::from_utf8_lossy(value).into_owned());
           text = &text[newline + 1..];
         } else {
+          // No newline - take rest of content
           env.insert(key_string, String::from_utf8_lossy(text).into_owned());
           break;
         }
       }
     } else {
+      // Regular key value pair.
+      // Example: `KEY=this is value`
       if let Some(newline) = find_char(text, CHAR_NL, 0) {
         let mut value = &text[..newline];
+        // Check if there is a comment in the line
+        // Example: KEY=value # comment
+        // The value pair should be `value`
         if let Some(hash) = find_char(value, CHAR_HASH, 0) {
           value = &value[..hash];
         }
@@ -370,6 +405,7 @@ fn parse_env_content(content: &str) -> HashMap<String, String> {
         env.insert(key_string, String::from_utf8_lossy(value).into_owned());
         text = &text[newline + 1..];
       } else {
+        // Last line without newline
         let mut value = text;
         if let Some(hash) = find_char(value, CHAR_HASH, 0) {
           value = &value[..hash];
