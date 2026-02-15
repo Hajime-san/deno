@@ -1,4 +1,5 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
+// Copyright Node.js contributors. All rights reserved. MIT License.
 
 #![deny(clippy::print_stderr)]
 #![deny(clippy::print_stdout)]
@@ -177,11 +178,21 @@ fn op_node_parse_env<'s>(
 fn parse_env_content(content: &str) -> HashMap<String, String> {
   let mut env = HashMap::new();
 
-  let mut text = trim_spaces(&remove_carriage_returns(content.as_bytes()));
+  let mut text = {
+    // Handle windows newlines "\r\n": remove "\r" and keep only "\n".
+    let mut out = Vec::with_capacity(content.len());
+    for &c in content.as_bytes() {
+      if c != CHAR_CR {
+        out.push(c);
+      }
+    }
+    trim_spaces(&out)
+  };
 
   while !text.is_empty() {
     let first = text[0];
 
+    // Skip empty lines and comments.
     if first == CHAR_NL || first == CHAR_HASH {
       if let Some(newline) = find_char(&text, CHAR_NL, 0) {
         text = text[newline + 1..].to_vec();
@@ -191,11 +202,25 @@ fn parse_env_content(content: &str) -> HashMap<String, String> {
       continue;
     }
 
-    let equal_or_newline = match find_eq_or_newline(&text) {
+    // Find the next equals sign or newline in a single pass.
+    let equal_or_newline = match {
+      let mut index = None;
+      let mut i = 0;
+      while i < text.len() {
+        let c = text[i];
+        if c == CHAR_EQ || c == CHAR_NL {
+          index = Some(i);
+          break;
+        }
+        i += 1;
+      }
+      index
+    } {
       Some(index) => index,
       None => break,
     };
 
+    // If we found a newline before equals, the line is invalid.
     if text[equal_or_newline] == CHAR_NL {
       text = trim_spaces(&text[equal_or_newline + 1..]);
       continue;
@@ -216,8 +241,18 @@ fn parse_env_content(content: &str) -> HashMap<String, String> {
       continue;
     }
 
-    // Preserve empty key behavior after stripping "export ".
-    if starts_with_export(&key) {
+    // Remove export prefix from key and ensure proper spacing.
+    if key.len() >= 7
+      && key[0] == b'e'
+      && key[1] == b'x'
+      && key[2] == b'p'
+      && key[3] == b'o'
+      && key[4] == b'r'
+      && key[5] == b't'
+      && key[6] == CHAR_SPACE
+    {
+      // Trim spaces after removing export prefix to handle cases like:
+      // export   FOO=bar
       key = trim_spaces(&key[7..]);
     }
 
@@ -228,9 +263,25 @@ fn parse_env_content(content: &str) -> HashMap<String, String> {
       break;
     }
 
+    // Expand new line if \n it's inside double quotes.
     if text[0] == CHAR_DQUOTE {
       if let Some(closing) = find_char(&text, CHAR_DQUOTE, 1) {
-        let value = replace_escaped_newlines(&text[1..closing]);
+        let value = {
+          let slice = &text[1..closing];
+          let mut out = Vec::with_capacity(slice.len());
+          let mut i = 0;
+          while i < slice.len() {
+            let c = slice[i];
+            if c == CHAR_BSLASH && i + 1 < slice.len() && slice[i + 1] == CHAR_N {
+              out.push(CHAR_NL);
+              i += 2;
+              continue;
+            }
+            out.push(c);
+            i += 1;
+          }
+          out
+        };
         env.insert(key_string, String::from_utf8_lossy(&value).into_owned());
 
         if let Some(newline) = find_char(&text, CHAR_NL, closing + 1) {
@@ -242,6 +293,7 @@ fn parse_env_content(content: &str) -> HashMap<String, String> {
       }
     }
 
+    // Handle quoted values (single quotes, double quotes, backticks).
     let quote = text[0];
     if quote == CHAR_SQUOTE || quote == CHAR_DQUOTE || quote == CHAR_BQUOTE {
       if let Some(closing) = find_char(&text, quote, 1) {
@@ -255,6 +307,7 @@ fn parse_env_content(content: &str) -> HashMap<String, String> {
         }
         continue;
       } else {
+        // If the closing quote is not found, take the entire line as the value.
         if let Some(newline) = find_char(&text, CHAR_NL, 0) {
           let value = text[..newline].to_vec();
           env.insert(key_string, String::from_utf8_lossy(&value).into_owned());
@@ -323,53 +376,10 @@ fn trim_spaces(input: &[u8]) -> Vec<u8> {
   input[start..=end].to_vec()
 }
 
-fn remove_carriage_returns(input: &[u8]) -> Vec<u8> {
-  input.iter().copied().filter(|c| *c != CHAR_CR).collect()
-}
-
-fn replace_escaped_newlines(input: &[u8]) -> Vec<u8> {
-  let mut out = Vec::with_capacity(input.len());
-  let mut i = 0;
-  while i < input.len() {
-    let c = input[i];
-    if c == CHAR_BSLASH && i + 1 < input.len() && input[i + 1] == CHAR_N {
-      out.push(CHAR_NL);
-      i += 2;
-      continue;
-    }
-    out.push(c);
-    i += 1;
-  }
-  out
-}
-
-fn starts_with_export(input: &[u8]) -> bool {
-  input.len() >= 7
-    && input[0] == b'e'
-    && input[1] == b'x'
-    && input[2] == b'p'
-    && input[3] == b'o'
-    && input[4] == b'r'
-    && input[5] == b't'
-    && input[6] == CHAR_SPACE
-}
-
 fn find_char(input: &[u8], char_code: u8, from: usize) -> Option<usize> {
   let mut i = from;
   while i < input.len() {
     if input[i] == char_code {
-      return Some(i);
-    }
-    i += 1;
-  }
-  None
-}
-
-fn find_eq_or_newline(input: &[u8]) -> Option<usize> {
-  let mut i = 0;
-  while i < input.len() {
-    let c = input[i];
-    if c == CHAR_EQ || c == CHAR_NL {
       return Some(i);
     }
     i += 1;
