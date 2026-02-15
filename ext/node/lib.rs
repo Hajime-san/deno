@@ -5,6 +5,7 @@
 #![allow(clippy::too_many_arguments)]
 
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::path::Path;
 
 use deno_core::FastString;
@@ -128,6 +129,254 @@ fn op_node_load_env_file(
   Ok(())
 }
 
+const CHAR_NL: u8 = b'\n';
+const CHAR_CR: u8 = b'\r';
+const CHAR_TAB: u8 = b'\t';
+const CHAR_SPACE: u8 = b' ';
+const CHAR_HASH: u8 = b'#';
+const CHAR_EQ: u8 = b'=';
+const CHAR_DQUOTE: u8 = b'"';
+const CHAR_SQUOTE: u8 = b'\'';
+const CHAR_BQUOTE: u8 = b'`';
+const CHAR_BSLASH: u8 = b'\\';
+const CHAR_N: u8 = b'n';
+
+#[op2]
+fn op_node_parse_env<'s>(
+  scope: &mut v8::PinScope<'s, '_>,
+  value: v8::Local<'s, v8::Value>,
+) -> v8::Local<'s, v8::Object> {
+  if !value.is_string() {
+    let message = v8::String::new(
+      scope,
+      "The \"content\" argument must be of type string.",
+    )
+    .unwrap();
+    let exception = v8::Exception::type_error(scope, message);
+    if let Some(obj) = exception.to_object(scope) {
+      let code_key = v8::String::new(scope, "code").unwrap();
+      let code_value = v8::String::new(scope, "ERR_INVALID_ARG_TYPE").unwrap();
+      let _ = obj.set(scope, code_key.into(), code_value.into());
+    }
+    scope.throw_exception(exception);
+    return v8::Object::new(scope);
+  }
+
+  let content = value.to_string(scope).unwrap();
+  let content = content.to_rust_string_lossy(scope);
+  let env = parse_env_content(&content);
+  let obj = v8::Object::new(scope);
+  for (key, value) in env {
+    let key = v8::String::new(scope, &key).unwrap();
+    let value = v8::String::new(scope, &value).unwrap();
+    let _ = obj.set(scope, key.into(), value.into());
+  }
+  obj
+}
+
+fn parse_env_content(content: &str) -> HashMap<String, String> {
+  let mut env = HashMap::new();
+
+  let mut text = trim_spaces(&remove_carriage_returns(content.as_bytes()));
+
+  while !text.is_empty() {
+    let first = text[0];
+
+    if first == CHAR_NL || first == CHAR_HASH {
+      if let Some(newline) = find_char(&text, CHAR_NL, 0) {
+        text = text[newline + 1..].to_vec();
+      } else {
+        text.clear();
+      }
+      continue;
+    }
+
+    let equal_or_newline = match find_eq_or_newline(&text) {
+      Some(index) => index,
+      None => break,
+    };
+
+    if text[equal_or_newline] == CHAR_NL {
+      text = trim_spaces(&text[equal_or_newline + 1..]);
+      continue;
+    }
+
+    let mut key = trim_spaces(&text[..equal_or_newline]);
+    text = text[equal_or_newline + 1..].to_vec();
+
+    if text.is_empty() || text[0] == CHAR_NL {
+      let key_string = String::from_utf8_lossy(&key).into_owned();
+      env.insert(key_string, String::new());
+      continue;
+    }
+
+    text = trim_spaces(&text);
+
+    if key.is_empty() {
+      continue;
+    }
+
+    // Preserve empty key behavior after stripping "export ".
+    if starts_with_export(&key) {
+      key = trim_spaces(&key[7..]);
+    }
+
+    let key_string = String::from_utf8_lossy(&key).into_owned();
+
+    if text.is_empty() {
+      env.insert(key_string, String::new());
+      break;
+    }
+
+    if text[0] == CHAR_DQUOTE {
+      if let Some(closing) = find_char(&text, CHAR_DQUOTE, 1) {
+        let value = replace_escaped_newlines(&text[1..closing]);
+        env.insert(key_string, String::from_utf8_lossy(&value).into_owned());
+
+        if let Some(newline) = find_char(&text, CHAR_NL, closing + 1) {
+          text = text[newline + 1..].to_vec();
+        } else {
+          text.clear();
+        }
+        continue;
+      }
+    }
+
+    let quote = text[0];
+    if quote == CHAR_SQUOTE || quote == CHAR_DQUOTE || quote == CHAR_BQUOTE {
+      if let Some(closing) = find_char(&text, quote, 1) {
+        let value = text[1..closing].to_vec();
+        env.insert(key_string, String::from_utf8_lossy(&value).into_owned());
+
+        if let Some(newline) = find_char(&text, CHAR_NL, closing + 1) {
+          text = text[newline + 1..].to_vec();
+        } else {
+          text.clear();
+        }
+        continue;
+      } else {
+        if let Some(newline) = find_char(&text, CHAR_NL, 0) {
+          let value = text[..newline].to_vec();
+          env.insert(key_string, String::from_utf8_lossy(&value).into_owned());
+          text = text[newline + 1..].to_vec();
+        } else {
+          env.insert(key_string, String::from_utf8_lossy(&text).into_owned());
+          break;
+        }
+      }
+    } else {
+      if let Some(newline) = find_char(&text, CHAR_NL, 0) {
+        let mut value = text[..newline].to_vec();
+        if let Some(hash) = find_char(&value, CHAR_HASH, 0) {
+          value = value[..hash].to_vec();
+        }
+        let value = trim_spaces(&value);
+        env.insert(key_string, String::from_utf8_lossy(&value).into_owned());
+        text = text[newline + 1..].to_vec();
+      } else {
+        let mut value = text;
+        if let Some(hash) = find_char(&value, CHAR_HASH, 0) {
+          value = value[..hash].to_vec();
+        }
+        let value = trim_spaces(&value);
+        env.insert(key_string, String::from_utf8_lossy(&value).into_owned());
+        text = Vec::new();
+      }
+    }
+
+    text = trim_spaces(&text);
+  }
+
+  env
+}
+
+fn trim_spaces(input: &[u8]) -> Vec<u8> {
+  if input.is_empty() {
+    return Vec::new();
+  }
+  let mut start = 0;
+  let mut end = input.len().saturating_sub(1);
+
+  while start <= end {
+    let c = input[start];
+    if c != CHAR_SPACE && c != CHAR_TAB && c != CHAR_NL {
+      break;
+    }
+    start += 1;
+  }
+
+  while end >= start {
+    let c = input[end];
+    if c != CHAR_SPACE && c != CHAR_TAB && c != CHAR_NL {
+      break;
+    }
+    if end == 0 {
+      break;
+    }
+    end -= 1;
+  }
+
+  if end < start {
+    return Vec::new();
+  }
+
+  input[start..=end].to_vec()
+}
+
+fn remove_carriage_returns(input: &[u8]) -> Vec<u8> {
+  input.iter().copied().filter(|c| *c != CHAR_CR).collect()
+}
+
+fn replace_escaped_newlines(input: &[u8]) -> Vec<u8> {
+  let mut out = Vec::with_capacity(input.len());
+  let mut i = 0;
+  while i < input.len() {
+    let c = input[i];
+    if c == CHAR_BSLASH && i + 1 < input.len() && input[i + 1] == CHAR_N {
+      out.push(CHAR_NL);
+      i += 2;
+      continue;
+    }
+    out.push(c);
+    i += 1;
+  }
+  out
+}
+
+fn starts_with_export(input: &[u8]) -> bool {
+  input.len() >= 7
+    && input[0] == b'e'
+    && input[1] == b'x'
+    && input[2] == b'p'
+    && input[3] == b'o'
+    && input[4] == b'r'
+    && input[5] == b't'
+    && input[6] == CHAR_SPACE
+}
+
+fn find_char(input: &[u8], char_code: u8, from: usize) -> Option<usize> {
+  let mut i = from;
+  while i < input.len() {
+    if input[i] == char_code {
+      return Some(i);
+    }
+    i += 1;
+  }
+  None
+}
+
+fn find_eq_or_newline(input: &[u8]) -> Option<usize> {
+  let mut i = 0;
+  while i < input.len() {
+    let c = input[i];
+    if c == CHAR_EQ || c == CHAR_NL {
+      return Some(i);
+    }
+    i += 1;
+  }
+  None
+}
+
 #[derive(Clone)]
 pub struct NodeExtInitServices<
   TInNpmPackageChecker: InNpmPackageChecker,
@@ -242,6 +491,7 @@ deno_core::extension!(deno_node,
     ops::os::op_homedir,
     op_node_build_os,
     op_node_load_env_file,
+    op_node_parse_env,
     ops::require::op_require_can_parse_as_esm,
     ops::require::op_require_init_paths,
     ops::require::op_require_node_module_paths<TSys>,

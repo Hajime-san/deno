@@ -1,7 +1,7 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
 import { core, primordials } from "ext:core/mod.js";
-import { op_node_call_is_from_dependency } from "ext:core/ops";
+import { op_node_call_is_from_dependency, op_node_parse_env } from "ext:core/ops";
 const {
   ArrayIsArray,
   ArrayPrototypeJoin,
@@ -49,9 +49,12 @@ import {
   validateString,
 } from "ext:deno_node/internal/validators.mjs";
 import { parseArgs } from "ext:deno_node/internal/util/parse_args/parse_args.js";
-import { parseEnv } from "ext:deno_node/internal/util/parse_env.ts";
+import { parseEnv as _parseEnv } from "ext:deno_node/internal/util/parse_env.ts";
 import * as abortSignal from "ext:deno_web/03_abort_signal.js";
 import { ERR_INVALID_ARG_TYPE } from "ext:deno_node/internal/errors.ts";
+
+const parseEnvJs = _parseEnv;
+const parseEnv = op_node_parse_env;
 
 let process: NodeJS.Process;
 const lazyLoadProcess = core.createLazyLoader<NodeJS.Process>(
@@ -67,6 +70,7 @@ export {
   inspect,
   parseArgs,
   parseEnv,
+  parseEnvJs,
   promisify,
   stripVTControlCharacters,
   styleText,
@@ -330,6 +334,7 @@ export default {
   callbackify,
   parseArgs,
   parseEnv,
+  parseEnvJs,
   promisify,
   inherits,
   types,
