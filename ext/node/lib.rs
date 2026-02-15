@@ -124,8 +124,11 @@ fn op_node_load_env_file(
     )
     .map_err(DotEnvLoadErr::Permission)?;
   // FIXME: The implementation of dotenvy is not Node.js compatible.
-  //
-  // % deno eval "import * as process from 'node:process'; process.loadEnvFile('valid.env');"
+  // % target/release/deno --version
+  // deno 2.6.9 (stable, release, aarch64-apple-darwin)
+  // v8 14.5.201.2-rusty
+  // typescript 5.9.2
+  // % target/release/deno eval "import * as process from 'node:process'; process.loadEnvFile('valid.env');"
   // error: Uncaught (in promise) Error: Error parsing line: '`    backticks    `', error at line index: 5
   //     at Module.loadEnvFile (node:process:580:10)
   //     at file:///Users/hajime_masutani/repository/deno/$deno$eval.mts:1:50
