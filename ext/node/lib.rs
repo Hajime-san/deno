@@ -124,6 +124,8 @@ fn op_node_load_env_file(
     )
     .map_err(DotEnvLoadErr::Permission)?;
   // FIXME: The implementation of dotenvy is not Node.js compatible.
+  // Use parse_env_content instead.
+  //
   // % target/release/deno --version
   // deno 2.6.9 (stable, release, aarch64-apple-darwin)
   // v8 14.5.201.2-rusty
