@@ -5,7 +5,6 @@
 #![allow(clippy::too_many_arguments)]
 
 use std::borrow::Cow;
-use std::collections::HashMap;
 use std::path::Path;
 
 use deno_core::FastString;
@@ -177,21 +176,18 @@ fn op_node_parse_env<'s>(
 
   let content = value.to_string(scope).unwrap();
   let content = content.to_rust_string_lossy(scope);
-  let env = parse_env_content(&content);
-  let obj = v8::Object::new(scope);
-  for (key, value) in env {
-    let key = v8::String::new(scope, &key).unwrap();
-    let value = v8::String::new(scope, &value).unwrap();
-    let _ = obj.set(scope, key.into(), value.into());
-  }
-  obj
+  let env_obj = v8::Object::new(scope);
+  parse_env_content_hook(&content, |key, value| {
+    let key = v8::String::new(scope, key).unwrap();
+    let value = v8::String::new(scope, value).unwrap();
+    env_obj.set(scope, key.into(), value.into());
+  });
+  env_obj
 }
 
 /// Ported from:
 /// https://github.com/nodejs/node/blob/9cc7fcc26dece769d9ffa06c453f0171311b01f8/src/node_dotenv.cc#L138-L315
-fn parse_env_content(content: &str) -> HashMap<String, String> {
-  let mut env = HashMap::new();
-
+fn parse_env_content_hook(content: &str, mut cb: impl FnMut(&str, &str)) {
   let raw = content.as_bytes();
   let mut filtered = Vec::new();
   let mut saw_cr = false;
@@ -271,8 +267,8 @@ fn parse_env_content(content: &str) -> HashMap<String, String> {
 
     // If the value is not present (e.g. KEY=) set it to an empty string
     if text.is_empty() || text[0] == CHAR_NL {
-      let key_string = String::from_utf8_lossy(key).into_owned();
-      env.insert(key_string, String::new());
+      let key_str = std::str::from_utf8(key).unwrap();
+      cb(key_str, "");
       continue;
     }
 
@@ -302,13 +298,13 @@ fn parse_env_content(content: &str) -> HashMap<String, String> {
       key = trim_spaces_slice(&key[7..]);
     }
 
-    let key_string = String::from_utf8_lossy(key).into_owned();
+    let key_str = std::str::from_utf8(key).unwrap();
 
     // SAFETY: Content is guaranteed to have at least one character
     // In case the last line is a single key without value
     // Example: KEY= (without a newline at the EOF)
     if text.is_empty() {
-      env.insert(key_string, String::new());
+      cb(key_str, "");
       break;
     }
 
@@ -327,8 +323,8 @@ fn parse_env_content(content: &str) -> HashMap<String, String> {
         }
         i += 1;
       }
-      let value_string = if !needs_unescape {
-        String::from_utf8_lossy(slice).into_owned()
+      let value_str = if !needs_unescape {
+        Cow::Borrowed(std::str::from_utf8(slice).unwrap())
       } else {
         let mut out = Vec::with_capacity(slice.len());
         let mut i = 0;
@@ -343,9 +339,9 @@ fn parse_env_content(content: &str) -> HashMap<String, String> {
           out.push(c);
           i += 1;
         }
-        String::from_utf8_lossy(&out).into_owned()
+        Cow::Owned(String::from_utf8(out).unwrap())
       };
-      env.insert(key_string, value_string);
+      cb(key_str, &value_str);
 
       if let Some(newline) = find_char(text, CHAR_NL, closing + 1) {
         text = &text[newline + 1..];
@@ -364,7 +360,7 @@ fn parse_env_content(content: &str) -> HashMap<String, String> {
       if let Some(closing) = find_char(text, quote, 1) {
         // Found closing quote - take content between quotes
         let value = &text[1..closing];
-        env.insert(key_string, String::from_utf8_lossy(value).into_owned());
+        cb(key_str, std::str::from_utf8(value).unwrap());
 
         if let Some(newline) = find_char(text, CHAR_NL, closing + 1) {
           text = &text[newline + 1..];
@@ -381,11 +377,11 @@ fn parse_env_content(content: &str) -> HashMap<String, String> {
         // The value pair should be `"value`
         if let Some(newline) = find_char(text, CHAR_NL, 0) {
           let value = &text[..newline];
-          env.insert(key_string, String::from_utf8_lossy(value).into_owned());
+          cb(key_str, std::str::from_utf8(value).unwrap());
           text = &text[newline + 1..];
         } else {
           // No newline - take rest of content
-          env.insert(key_string, String::from_utf8_lossy(text).into_owned());
+          cb(key_str, std::str::from_utf8(text).unwrap());
           break;
         }
       }
@@ -401,7 +397,7 @@ fn parse_env_content(content: &str) -> HashMap<String, String> {
           value = &value[..hash];
         }
         let value = trim_spaces_slice(value);
-        env.insert(key_string, String::from_utf8_lossy(value).into_owned());
+        cb(key_str, std::str::from_utf8(value).unwrap());
         text = &text[newline + 1..];
       } else {
         // Last line without newline
@@ -410,15 +406,13 @@ fn parse_env_content(content: &str) -> HashMap<String, String> {
           value = &value[..hash];
         }
         let value = trim_spaces_slice(value);
-        env.insert(key_string, String::from_utf8_lossy(value).into_owned());
+        cb(key_str, std::str::from_utf8(value).unwrap());
         text = &[];
       }
     }
 
     text = trim_spaces_slice(text);
   }
-
-  env
 }
 
 fn trim_spaces_slice(input: &[u8]) -> &[u8] {
