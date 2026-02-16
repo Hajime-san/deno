@@ -5,6 +5,8 @@
 #![allow(clippy::too_many_arguments)]
 
 use std::borrow::Cow;
+use std::env;
+use std::fs;
 use std::path::Path;
 
 use deno_core::FastString;
@@ -123,7 +125,7 @@ fn op_node_load_env_file(
     )
     .map_err(DotEnvLoadErr::Permission)?;
   // FIXME: The implementation of dotenvy is not Node.js compatible.
-  // Use parse_env_content instead.
+  // Use parse_env_content_hook instead.
   //
   // % target/release/deno --version
   // deno 2.6.9 (stable, release, aarch64-apple-darwin)
@@ -136,7 +138,17 @@ fn op_node_load_env_file(
   //
   // ref:
   // https://github.com/denoland/node_test/blob/170b25ab9080b9d58d21b582fbf28ee5676b8387/test/fixtures/dotenv/valid.env
-  dotenvy::from_filename(path).map_err(DotEnvLoadErr::DotEnv)?;
+
+  #[allow(clippy::disallowed_methods)]
+  let contents =
+    fs::read_to_string(path).expect("Should have been able to read the file");
+
+  parse_env_content_hook(&contents, |key, value| {
+    #[allow(clippy::undocumented_unsafe_blocks)]
+    unsafe {
+      env::set_var(key, value);
+    }
+  });
 
   Ok(())
 }
