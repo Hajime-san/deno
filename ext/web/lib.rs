@@ -12,6 +12,7 @@ mod geometry;
 mod image_data;
 mod message_port;
 mod stream_resource;
+mod structured_clone;
 mod timers;
 mod url;
 mod urlpattern;
@@ -147,6 +148,7 @@ deno_core::extension!(deno_web,
     broadcast_channel::op_broadcast_free,
     broadcast_channel::op_broadcast_send,
     broadcast_channel::op_broadcast_recv,
+    structured_clone::structured_clone,
   ],
   objects = [
     css_stylesheet::CSSRule,
