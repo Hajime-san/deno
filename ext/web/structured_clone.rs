@@ -1,8 +1,9 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
-use deno_core::v8;
-use deno_core::op2;
+use std::collections::HashMap;
 
+use deno_core::op2;
+use deno_core::v8;
 use deno_error::JsErrorBox;
 
 // scoped_refptr<SerializedScriptValue> PostMessageHelper::SerializeMessageByMove(
@@ -66,13 +67,23 @@ use deno_error::JsErrorBox;
 
 // https://source.chromium.org/chromium/chromium/src/+/main:third_party/blink/renderer/core/frame/universal_global_scope.cc;l=70
 
+static TRANSFER_STR: deno_core::FastStaticString =
+  deno_core::ascii_str!("transfer");
+
+#[derive(PartialEq)]
+enum SerializedValue<'s> {
+  Primitive(v8::Local<'s, v8::Value>),
+}
+
+// https://html.spec.whatwg.org/multipage/structured-data.html#dom-structuredclone
 #[op2]
-pub fn structured_clone<'a>(
-  scope: &mut v8::PinScope<'a, '_>,
-  value: v8::Local<'a, v8::Value>,
+pub fn structured_clone<'s, 'i>(
+  scope: &mut v8::PinScope<'s, 'i>,
+  value: v8::Local<'s, v8::Value>,
+  options: Option<v8::Local<'s, v8::Object>>,
   // #[varargs] options: Option<&v8::Value>,
   // options: const StructuredSerializeOptions* options,
-) -> Result<v8::Global<v8::Value>, JsErrorBox> {
+) -> Result<v8::Local<'s, v8::Value>, JsErrorBox> {
   // if (!script_state->ContextIsValid()) {
   //   return ScriptValue();
   // }
@@ -109,23 +120,67 @@ pub fn structured_clone<'a>(
   // return ScriptValue(isolate,
   //                    unpacked->Deserialize(isolate, deserialize_options));
 
+  let mut memory: HashMap<v8::Local<v8::Value>, u32> = HashMap::new();
 
-  return Err(JsErrorBox::new(
-    "Error",
-    "👺👺👺",
-  ));
+  let serialized = structured_serialize_internal(value, false, &mut memory)?;
+  let deserialize = structured_deserialize(serialized, false, &mut memory)?;
 
-  let context = scope.get_current_context();
-  v8::tc_scope!(tc_scope, scope);
+  Ok(deserialize)
 
-  if tc_scope.has_caught() {
-    return Ok(v8::Global::new(tc_scope, value));
-  }
-  // https://html.spec.whatwg.org/multipage/structured-data.html#dom-structuredclone
+  // let context = scope.get_current_context();
+  // v8::tc_scope!(tc_scope, scope);
+
+  // if tc_scope.has_caught() {
+  //   return Ok(v8::Local::new(tc_scope, value));
+  // }
+}
+
+// https://html.spec.whatwg.org/multipage/structured-data.html#structuredserializeinternal
+fn structured_serialize_internal<'s>(
+  value: v8::Local<'s, v8::Value>,
+  for_storage: bool,
+  memory: &mut HashMap<v8::Local<v8::Value>, u32>,
+) -> Result<SerializedValue<'s>, JsErrorBox> {
   // 1.
+  // 2.
+  // if memory.contains_key(&value) {
+  //   return Ok(SerializedValue::Primitive(value));
+  // }
+  // 3.
+  let mut deep = false;
+  // 4.
+  if value.is_undefined()
+    || value.is_null()
+    || value.is_boolean()
+    || value.is_number()
+    || value.is_big_int()
+    || value.is_string()
+  {
+    return Ok(SerializedValue::Primitive(value));
+  }
 
+  return Err(JsErrorBox::new("DataCloneError", "👺👺👺"));
+}
 
-  return Ok(v8::Global::new(tc_scope, value));
+// https://html.spec.whatwg.org/multipage/structured-data.html#structureddeserialize
+fn structured_deserialize<'s>(
+  serialized: SerializedValue<'s>,
+  target_realm: bool,
+  memory: &mut HashMap<v8::Local<v8::Value>, u32>,
+) -> Result<v8::Local<'s, v8::Value>, JsErrorBox> {
+  // 1.
+  // 2.
+  // if memory.contains_key(&serialized) {
+  //   return Ok(serialized);
+  // }
+  // 3.
+  let mut deep = false;
+  // 4.
+
+  match serialized {
+    SerializedValue::Primitive(serialized) => Ok(serialized),
+    _ => todo!(),
+  }
 }
 
 // deno_core::extension!(

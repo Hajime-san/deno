@@ -38,7 +38,9 @@ const loadHeaders = () => core.loadExtScript("ext:deno_fetch/20_headers.js");
 let _structuredClone;
 const loadStructuredClone = () =>
   _structuredClone ??
-    (_structuredClone = core.loadExtScript("ext:deno_web/02_structured_clone.js"));
+    (_structuredClone = core.loadExtScript(
+      "ext:deno_web/02_structured_clone.js",
+    ));
 // 06_streams.js is the 208 KB web-streams polyfill. Defer until a global
 // stream class (ReadableStream/WritableStream/TransformStream/etc.) is
 // accessed.
