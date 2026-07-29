@@ -1,21 +1,41 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
-use std::collections::HashMap;
-
 use deno_core::v8;
 use deno_core::v8::ValueDeserializerHelper;
 use deno_core::v8::ValueSerializerHelper;
 use deno_error::JsErrorBox;
 
-#[derive(PartialEq)]
+// The structuredClone implementation does not correspond one-to-one with the
+// steps in the WHATWG spec.
+//
+// Recursive serialization and deserialization of ECMAScript built-in object
+// graphs is delegated to V8's ValueSerializer and ValueDeserializer. This
+// preserves cycles, shared references, and V8's representation of built-ins
+// such as Array, Map, Set, Date, and more.
+//
+// Deno implements platform objects that V8 does not know about. This includes
+// Web platform objects such as Blob, whose primary interface is [Serializable],
+// and OffscreenCanvas, whose primary interface is [Transferable]. Delegates
+// implementing v8::ValueSerializerImpl and v8::ValueDeserializerImpl detect,
+// serialize, and deserialize these platform objects within an object graph.
+//
+// Transfer list validation, transferability checks, ownership transfer, and
+// detachment belong to the outer implementation of WHATWG
+// StructuredSerializeWithTransfer. The V8 serializer receives the transfer
+// state prepared by that layer.
+
 pub enum SerializedValue<'s> {
   Primitive(v8::Local<'s, v8::Value>),
-  Object(Vec<u8>),
+  V8(Vec<u8>),
 }
 
-struct ValueSerializer;
+// V8 owns reference tracking while it serializes a complete object graph.
+// Keep Web(Deno) platform specific state here as support is added.
+struct V8SerializerDelegate {
+  _for_storage: bool,
+}
 
-impl v8::ValueSerializerImpl for ValueSerializer {
+impl v8::ValueSerializerImpl for V8SerializerDelegate {
   fn throw_data_clone_error<'s>(
     &self,
     scope: &mut v8::PinScope<'s, '_>,
@@ -54,9 +74,9 @@ impl v8::ValueSerializerImpl for ValueSerializer {
   // }
 }
 
-struct ValueDeserializer;
+struct V8DeserializerDelegate;
 
-impl v8::ValueDeserializerImpl for ValueDeserializer {}
+impl v8::ValueDeserializerImpl for V8DeserializerDelegate {}
 
 // https://html.spec.whatwg.org/multipage/structured-data.html#structuredserializeinternal
 pub fn structured_serialize_internal<'s, 'i>(
@@ -64,17 +84,7 @@ pub fn structured_serialize_internal<'s, 'i>(
   context: v8::Local<'s, v8::Context>,
   value: v8::Local<'s, v8::Value>,
   for_storage: bool,
-  memory: &mut HashMap<v8::Local<v8::Value>, u32>,
 ) -> Result<SerializedValue<'s>, JsErrorBox> {
-  // 1.
-  // 2.
-  // if memory.contains_key(&value) {
-  //   return Ok(SerializedValue::Primitive(value));
-  // }
-
-  // 3.
-  let mut deep = false;
-
   // 4.
   if value.is_undefined()
     || value.is_null()
@@ -91,70 +101,38 @@ pub fn structured_serialize_internal<'s, 'i>(
     return Err(JsErrorBox::new("DataCloneError", "Cannot serialize Symbol"));
   }
 
-  // 6.
-  let serializer =
-    v8::ValueSerializer::new(scope, Box::new(ValueSerializer {}));
-  let mut serialized = vec![];
+  // 6.~
+  // V8 owns the recursive object graph traversal, including reference tracking
+  // for aliases and cycles. Do not invoke this backend recursively per type.
+  serialize_v8_graph(scope, context, value, for_storage)
+}
 
-  if value.is_object() {
-    if
-    // 7.
-    value.is_boolean_object()
-    // 8.
-    || value.is_number_object()
-    // 9.
-    || value.is_big_int_object()
-    // 10.
-    || value.is_string_object()
-    // 11.
-    || value.is_date()
-    // 12.
-    || value.is_reg_exp()
-    {
-      serializer.write_header();
-      serializer.write_value(context, value);
-      let mut binary_value = serializer.release();
-      serialized.append(&mut binary_value);
-    }
+fn serialize_v8_graph<'s, 'i>(
+  scope: &mut v8::PinScope<'s, 'i>,
+  context: v8::Local<'s, v8::Context>,
+  value: v8::Local<'s, v8::Value>,
+  for_storage: bool,
+) -> Result<SerializedValue<'s>, JsErrorBox> {
+  let serializer = v8::ValueSerializer::new(
+    scope,
+    Box::new(V8SerializerDelegate {
+      _for_storage: for_storage,
+    }),
+  );
+  serializer.write_header();
 
-    // 13.
-
-    // 1.
-    if value.is_shared_array_buffer() {
-      // 1. skip
-      // 2.
-      if for_storage {
-        return Err(JsErrorBox::new(
-          "DataCloneError",
-          "Cannot serialize SharedArrayBuffer for storage",
-        ));
-      }
-      // 3.
-      // 4.
-      // let shared_array_buffer = v8::Local::<v8::SharedArrayBuffer>::try_from(value)?;
-      // let backing_store = shared_array_buffer.get_backing_store();
-      // if !backing_store.is_resizable_by_user_javascript() {
-      // }
-      serializer.write_header();
-      serializer.write_value(context, value);
-      let mut binary_value = serializer.release();
-      serialized.append(&mut binary_value);
-    }
-    // 2.
-    else {
-      // 1.
-      if let Ok(array_buffer) = v8::Local::<v8::ArrayBuffer>::try_from(value) {
-        if array_buffer.is_detachable() {
-          return Err(JsErrorBox::new(
-            "DataCloneError",
-            "Cannot serialize detached ArrayBuffer",
-          ));
-        }
-      }
-    }
+  v8::tc_scope!(let tc_scope, scope);
+  let written = serializer.write_value(context, value);
+  if tc_scope.has_caught() || tc_scope.has_terminated() {
+    tc_scope.rethrow();
+    // The pending V8 exception is rethrown by the op dispatcher.
+    return Ok(SerializedValue::V8(vec![]));
+  }
+  if written != Some(true) {
+    return Err(JsErrorBox::type_error("Failed to serialize value"));
   }
 
-  Ok(SerializedValue::Object(serialized))
+  Ok(SerializedValue::V8(serializer.release()))
 }
 
 // https://html.spec.whatwg.org/multipage/structured-data.html#structureddeserialize
@@ -162,66 +140,32 @@ pub fn structured_deserialize<'s, 'i>(
   scope: &mut v8::PinScope<'s, 'i>,
   serialized: SerializedValue<'s>,
   target_realm: v8::Local<'s, v8::Context>,
-  memory: &mut HashMap<v8::Local<v8::Value>, u32>,
 ) -> Result<v8::Local<'s, v8::Value>, JsErrorBox> {
-  // 1.
-  // 2.
-  // if memory.contains_key(&serialized) {
-  //   return Ok(serialized);
-  // }
-  // 3.
-  let mut deep = false;
   // 4.
-  let value = match serialized {
+  match serialized {
     // 5.
-    SerializedValue::Primitive(serialized) => serialized,
-    SerializedValue::Object(obj) => {
-      let value_deserializer =
-        v8::ValueDeserializer::new(scope, Box::new(ValueDeserializer {}), &obj);
-      let parsed_header = value_deserializer
-        .read_header(scope.get_current_context())
-        .unwrap_or_default();
-      if !parsed_header {
-        return Err(JsErrorBox::range_error("Cannot deserialize value header"));
-      }
-      let Some(value) =
-        value_deserializer.read_value(scope.get_current_context())
-      else {
-        return Err(JsErrorBox::range_error("Cannot read deserialize value"));
-      };
-
-      if
-      // 6.
-      value.is_boolean_object()
-      // 7.
-      || value.is_number_object()
-      // 8.
-      || value.is_big_int_object()
-      // 9.
-      || value.is_string_object()
-      // 10.
-      || value.is_date()
-      // 11.
-      || value.is_reg_exp()
-      {
-        return Ok(value);
-      }
-
-      if value.is_shared_array_buffer() {
-        // 12.
-
-        // 13.
-        // let shared_array_buffer = v8::Local::<v8::SharedArrayBuffer>::try_from(value)?;
-        // let backing_store = shared_array_buffer.get_backing_store();
-        // if backing_store.is_resizable_by_user_javascript() {
-
-        // }
-        return Ok(value);
-      }
-
-      unreachable!()
+    SerializedValue::Primitive(value) => Ok(value),
+    // 6.~
+    SerializedValue::V8(bytes) => {
+      deserialize_v8_graph(scope, target_realm, &bytes)
     }
-  };
+  }
+}
 
-  Ok(value.into())
+fn deserialize_v8_graph<'s, 'i>(
+  scope: &mut v8::PinScope<'s, 'i>,
+  target_realm: v8::Local<'s, v8::Context>,
+  bytes: &[u8],
+) -> Result<v8::Local<'s, v8::Value>, JsErrorBox> {
+  let deserializer = v8::ValueDeserializer::new(
+    scope,
+    Box::new(V8DeserializerDelegate {}),
+    bytes,
+  );
+  if !deserializer.read_header(target_realm).unwrap_or_default() {
+    return Err(JsErrorBox::range_error("Cannot deserialize value header"));
+  }
+  deserializer
+    .read_value(target_realm)
+    .ok_or_else(|| JsErrorBox::range_error("Cannot read deserialize value"))
 }
