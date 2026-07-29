@@ -44,6 +44,7 @@ mod tasks;
   reason = "generated bindings match external API naming"
 )]
 pub mod uv_compat;
+mod web_serialize_deserialize;
 mod web_timeout;
 pub mod webidl;
 
@@ -206,6 +207,8 @@ pub use crate::source_map::SourceMapData;
 pub use crate::source_map::SourceMapper;
 pub use crate::tasks::V8CrossThreadTaskSpawner;
 pub use crate::tasks::V8TaskSpawner;
+pub use crate::web_serialize_deserialize::structured_deserialize;
+pub use crate::web_serialize_deserialize::structured_serialize_internal;
 
 // Ensure we can use op2 in deno_core without any hackery.
 extern crate self as deno_core;

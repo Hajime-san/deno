@@ -3,9 +3,9 @@
 use std::collections::HashMap;
 
 use deno_core::op2;
+use deno_core::structured_deserialize;
+use deno_core::structured_serialize_internal;
 use deno_core::v8;
-use deno_core::v8::ValueDeserializerHelper;
-use deno_core::v8::ValueSerializerHelper;
 use deno_error::JsErrorBox;
 
 // scoped_refptr<SerializedScriptValue> PostMessageHelper::SerializeMessageByMove(
@@ -69,32 +69,6 @@ use deno_error::JsErrorBox;
 
 // https://source.chromium.org/chromium/chromium/src/+/main:third_party/blink/renderer/core/frame/universal_global_scope.cc;l=70
 
-static TRANSFER_STR: deno_core::FastStaticString =
-  deno_core::ascii_str!("transfer");
-
-#[derive(PartialEq)]
-enum SerializedValue<'s> {
-  Primitive(v8::Local<'s, v8::Value>),
-  Object(Vec<u8>),
-}
-
-struct ValueSerializer;
-
-impl v8::ValueSerializerImpl for ValueSerializer {
-  fn throw_data_clone_error<'s>(
-    &self,
-    scope: &mut v8::PinScope<'s, '_>,
-    message: v8::Local<'s, v8::String>,
-  ) {
-    let error = v8::Exception::error(scope, message);
-    scope.throw_exception(error);
-  }
-}
-
-struct ValueDeserializer;
-
-impl v8::ValueDeserializerImpl for ValueDeserializer {}
-
 // https://html.spec.whatwg.org/multipage/structured-data.html#dom-structuredclone
 #[op2]
 pub fn structured_clone<'s, 'i>(
@@ -157,124 +131,4 @@ pub fn structured_clone<'s, 'i>(
   // if tc_scope.has_caught() {
   //   return Ok(v8::Local::new(tc_scope, value));
   // }
-}
-
-// https://html.spec.whatwg.org/multipage/structured-data.html#structuredserializeinternal
-fn structured_serialize_internal<'s, 'i>(
-  scope: &mut v8::PinScope<'s, 'i>,
-  context: v8::Local<'s, v8::Context>,
-  value: v8::Local<'s, v8::Value>,
-  for_storage: bool,
-  memory: &mut HashMap<v8::Local<v8::Value>, u32>,
-) -> Result<SerializedValue<'s>, JsErrorBox> {
-  // 1.
-  // 2.
-  // if memory.contains_key(&value) {
-  //   return Ok(SerializedValue::Primitive(value));
-  // }
-
-  // 3.
-  let mut deep = false;
-
-  // 4.
-  if value.is_undefined()
-    || value.is_null()
-    || value.is_boolean()
-    || value.is_number()
-    || value.is_big_int()
-    || value.is_string()
-  {
-    return Ok(SerializedValue::Primitive(value));
-  }
-
-  // 5.
-  if value.is_symbol() {
-    return Err(JsErrorBox::new("DataCloneError", "Cannot serialize Symbol"));
-  }
-
-  // 6.
-  let serializer =
-    v8::ValueSerializer::new(scope, Box::new(ValueSerializer {}));
-  let mut serialized = vec![];
-
-  if value.is_object() {
-    if
-    // 7.
-    value.is_boolean_object()
-    // 8.
-    || value.is_number_object()
-    // 9.
-    || value.is_big_int_object()
-    // 10.
-    || value.is_string_object()
-    // 11.
-    || value.is_date()
-    // 12.
-    || value.is_reg_exp()
-    {
-      serializer.write_header();
-      serializer.write_value(context, value);
-      let mut binary_value = serializer.release();
-      serialized.append(&mut binary_value);
-    }
-  }
-
-  Ok(SerializedValue::Object(serialized))
-}
-
-// https://html.spec.whatwg.org/multipage/structured-data.html#structureddeserialize
-fn structured_deserialize<'s, 'i>(
-  scope: &mut v8::PinScope<'s, 'i>,
-  serialized: SerializedValue<'s>,
-  target_realm: v8::Local<'s, v8::Context>,
-  memory: &mut HashMap<v8::Local<v8::Value>, u32>,
-) -> Result<v8::Local<'s, v8::Value>, JsErrorBox> {
-  // 1.
-  // 2.
-  // if memory.contains_key(&serialized) {
-  //   return Ok(serialized);
-  // }
-  // 3.
-  let mut deep = false;
-  // 4.
-  let value = match serialized {
-    // 5.
-    SerializedValue::Primitive(serialized) => serialized,
-    SerializedValue::Object(obj) => {
-      let value_deserializer =
-        v8::ValueDeserializer::new(scope, Box::new(ValueDeserializer {}), &obj);
-      let parsed_header = value_deserializer
-        .read_header(scope.get_current_context())
-        .unwrap_or_default();
-      if !parsed_header {
-        return Err(JsErrorBox::range_error("could not deserialize value"));
-      }
-      let Some(value) =
-        value_deserializer.read_value(scope.get_current_context())
-      else {
-        return Err(JsErrorBox::range_error("could not deserialize value"));
-      };
-
-      if
-      // 6.
-      value.is_boolean_object()
-      // 7.
-      || value.is_number_object()
-      // 8.
-      || value.is_big_int_object()
-      // 9.
-      || value.is_string_object()
-      // 10.
-      || value.is_date()
-      // 11.
-      || value.is_reg_exp()
-      {
-        return Ok(value);
-      }
-
-      return Ok(value);
-    }
-  };
-
-  Ok(value.into())
 }
