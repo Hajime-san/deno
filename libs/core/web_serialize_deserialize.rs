@@ -29,13 +29,42 @@ pub enum SerializedValue<'s> {
   V8(Vec<u8>),
 }
 
-// V8 owns reference tracking while it serializes a complete object graph.
-// Keep Web(Deno) platform specific state here as support is added.
-struct V8SerializerDelegate {
-  _for_storage: bool,
+/// Hooks for platform objects whose serialization is defined by the embedder.
+///
+/// The hooks are called by V8 while it walks a single object graph, so they
+/// must write and read exactly one host-object record per invocation.
+pub trait StructuredCloneHostObjectRegistry {
+  fn is_host_object<'s, 'i>(
+    &self,
+    scope: &mut v8::PinScope<'s, 'i>,
+    object: v8::Local<'s, v8::Object>,
+  ) -> bool;
+
+  fn write_host_object<'s, 'i>(
+    &self,
+    scope: &mut v8::PinScope<'s, 'i>,
+    object: v8::Local<'s, v8::Object>,
+    serializer: &dyn v8::ValueSerializerHelper,
+  ) -> Option<bool>;
+
+  fn read_host_object<'s, 'i>(
+    &self,
+    scope: &mut v8::PinScope<'s, 'i>,
+    deserializer: &dyn v8::ValueDeserializerHelper,
+  ) -> Option<v8::Local<'s, v8::Object>>;
 }
 
-impl v8::ValueSerializerImpl for V8SerializerDelegate {
+// V8 owns reference tracking while it serializes a complete object graph.
+// Keep Web(Deno) platform specific state here as support is added.
+struct V8SerializerDelegate<'a, R> {
+  _for_storage: bool,
+  host_objects: &'a R,
+}
+
+impl<R> v8::ValueSerializerImpl for V8SerializerDelegate<'_, R>
+where
+  R: StructuredCloneHostObjectRegistry,
+{
   fn throw_data_clone_error<'s>(
     &self,
     scope: &mut v8::PinScope<'s, '_>,
@@ -43,6 +72,29 @@ impl v8::ValueSerializerImpl for V8SerializerDelegate {
   ) {
     let error = v8::Exception::error(scope, message);
     scope.throw_exception(error);
+  }
+
+  fn has_custom_host_object(&self, _isolate: &v8::Isolate) -> bool {
+    true
+  }
+
+  fn is_host_object<'s, 'i>(
+    &self,
+    scope: &mut v8::PinScope<'s, 'i>,
+    object: v8::Local<'s, v8::Object>,
+  ) -> Option<bool> {
+    Some(self.host_objects.is_host_object(scope, object))
+  }
+
+  fn write_host_object<'s, 'i>(
+    &self,
+    scope: &mut v8::PinScope<'s, 'i>,
+    object: v8::Local<'s, v8::Object>,
+    serializer: &dyn v8::ValueSerializerHelper,
+  ) -> Option<bool> {
+    self
+      .host_objects
+      .write_host_object(scope, object, serializer)
   }
 
   // fn get_shared_array_buffer_id<'s, 'i>(
@@ -74,17 +126,34 @@ impl v8::ValueSerializerImpl for V8SerializerDelegate {
   // }
 }
 
-struct V8DeserializerDelegate;
+struct V8DeserializerDelegate<'a, R> {
+  host_objects: &'a R,
+}
 
-impl v8::ValueDeserializerImpl for V8DeserializerDelegate {}
+impl<R> v8::ValueDeserializerImpl for V8DeserializerDelegate<'_, R>
+where
+  R: StructuredCloneHostObjectRegistry,
+{
+  fn read_host_object<'s, 'i>(
+    &self,
+    scope: &mut v8::PinScope<'s, 'i>,
+    deserializer: &dyn v8::ValueDeserializerHelper,
+  ) -> Option<v8::Local<'s, v8::Object>> {
+    self.host_objects.read_host_object(scope, deserializer)
+  }
+}
 
 // https://html.spec.whatwg.org/multipage/structured-data.html#structuredserializeinternal
-pub fn structured_serialize_internal<'s, 'i>(
+pub fn structured_serialize_internal<'s, 'i, R>(
   scope: &mut v8::PinScope<'s, 'i>,
   context: v8::Local<'s, v8::Context>,
   value: v8::Local<'s, v8::Value>,
   for_storage: bool,
-) -> Result<SerializedValue<'s>, JsErrorBox> {
+  host_objects: &R,
+) -> Result<SerializedValue<'s>, JsErrorBox>
+where
+  R: StructuredCloneHostObjectRegistry,
+{
   // 4.
   if value.is_undefined()
     || value.is_null()
@@ -104,19 +173,24 @@ pub fn structured_serialize_internal<'s, 'i>(
   // 6.~
   // V8 owns the recursive object graph traversal, including reference tracking
   // for aliases and cycles. Do not invoke this backend recursively per type.
-  serialize_v8_graph(scope, context, value, for_storage)
+  serialize_v8_graph(scope, context, value, for_storage, host_objects)
 }
 
-fn serialize_v8_graph<'s, 'i>(
+fn serialize_v8_graph<'s, 'i, R>(
   scope: &mut v8::PinScope<'s, 'i>,
   context: v8::Local<'s, v8::Context>,
   value: v8::Local<'s, v8::Value>,
   for_storage: bool,
-) -> Result<SerializedValue<'s>, JsErrorBox> {
+  host_objects: &R,
+) -> Result<SerializedValue<'s>, JsErrorBox>
+where
+  R: StructuredCloneHostObjectRegistry,
+{
   let serializer = v8::ValueSerializer::new(
     scope,
     Box::new(V8SerializerDelegate {
       _for_storage: for_storage,
+      host_objects,
     }),
   );
   serializer.write_header();
@@ -136,30 +210,38 @@ fn serialize_v8_graph<'s, 'i>(
 }
 
 // https://html.spec.whatwg.org/multipage/structured-data.html#structureddeserialize
-pub fn structured_deserialize<'s, 'i>(
+pub fn structured_deserialize<'s, 'i, R>(
   scope: &mut v8::PinScope<'s, 'i>,
   serialized: SerializedValue<'s>,
   target_realm: v8::Local<'s, v8::Context>,
-) -> Result<v8::Local<'s, v8::Value>, JsErrorBox> {
+  host_objects: &R,
+) -> Result<v8::Local<'s, v8::Value>, JsErrorBox>
+where
+  R: StructuredCloneHostObjectRegistry,
+{
   // 4.
   match serialized {
     // 5.
     SerializedValue::Primitive(value) => Ok(value),
     // 6.~
     SerializedValue::V8(bytes) => {
-      deserialize_v8_graph(scope, target_realm, &bytes)
+      deserialize_v8_graph(scope, target_realm, &bytes, host_objects)
     }
   }
 }
 
-fn deserialize_v8_graph<'s, 'i>(
+fn deserialize_v8_graph<'s, 'i, R>(
   scope: &mut v8::PinScope<'s, 'i>,
   target_realm: v8::Local<'s, v8::Context>,
   bytes: &[u8],
-) -> Result<v8::Local<'s, v8::Value>, JsErrorBox> {
+  host_objects: &R,
+) -> Result<v8::Local<'s, v8::Value>, JsErrorBox>
+where
+  R: StructuredCloneHostObjectRegistry,
+{
   let deserializer = v8::ValueDeserializer::new(
     scope,
-    Box::new(V8DeserializerDelegate {}),
+    Box::new(V8DeserializerDelegate { host_objects }),
     bytes,
   );
   if !deserializer.read_header(target_realm).unwrap_or_default() {

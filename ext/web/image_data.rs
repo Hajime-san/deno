@@ -113,6 +113,92 @@ pub struct ImageData {
   data: v8::TracedReference<v8::Object>,
 }
 
+impl ImageData {
+  pub(crate) fn is_structured_clone_host_object<'s, 'i>(
+    scope: &mut v8::PinScope<'s, 'i>,
+    object: v8::Local<'s, v8::Object>,
+  ) -> bool {
+    deno_core::cppgc::try_unwrap_cppgc_object::<ImageData>(scope, object.into())
+      .is_some()
+  }
+
+  pub(crate) fn write_structured_clone_payload<'s, 'i>(
+    scope: &mut v8::PinScope<'s, 'i>,
+    object: v8::Local<'s, v8::Object>,
+    serializer: &dyn v8::ValueSerializerHelper,
+  ) -> Option<bool> {
+    let image_data = deno_core::cppgc::try_unwrap_cppgc_object::<ImageData>(
+      scope,
+      object.into(),
+    )?;
+    // SAFETY: `object` remains live for this V8 serializer callback.
+    let image_data = unsafe { image_data.as_ref() };
+
+    serializer.write_uint32(image_data.width);
+    serializer.write_uint32(image_data.height);
+    serializer.write_uint32(image_data.pixel_format as u32);
+    serializer.write_uint32(image_data.color_space as u32);
+    serializer.write_value(
+      scope.get_current_context(),
+      image_data.data.get(scope)?.into(),
+    )
+  }
+
+  pub(crate) fn read_structured_clone_payload<'s, 'i>(
+    scope: &mut v8::PinScope<'s, 'i>,
+    deserializer: &dyn v8::ValueDeserializerHelper,
+  ) -> Option<v8::Local<'s, v8::Object>> {
+    let mut width = 0;
+    let mut height = 0;
+    let mut pixel_format = 0;
+    let mut color_space = 0;
+    if !deserializer.read_uint32(&mut width)
+      || !deserializer.read_uint32(&mut height)
+      || !deserializer.read_uint32(&mut pixel_format)
+      || !deserializer.read_uint32(&mut color_space)
+    {
+      return None;
+    }
+
+    let pixel_format = match pixel_format {
+      0 => ImageDataPixelFormat::RgbaUnorm8,
+      1 => ImageDataPixelFormat::RgbaFloat16,
+      _ => return None,
+    };
+    let color_space = match color_space {
+      0 => PredefinedColorSpace::Srgb,
+      1 => PredefinedColorSpace::DisplayP3,
+      _ => return None,
+    };
+    let data = deserializer
+      .read_value(scope.get_current_context())?
+      .try_cast::<v8::Object>()
+      .ok()?;
+    let valid_data_type = match pixel_format {
+      ImageDataPixelFormat::RgbaUnorm8 => data.is_uint8_clamped_array(),
+      ImageDataPixelFormat::RgbaFloat16 => data.is_float16_array(),
+    };
+    let expected_length = (width as usize)
+      .checked_mul(height as usize)?
+      .checked_mul(4)?;
+    let typed_array = v8::Local::<v8::TypedArray>::try_from(data).ok()?;
+    if !valid_data_type || typed_array.length() != expected_length {
+      return None;
+    }
+
+    Some(deno_core::cppgc::make_cppgc_object(
+      scope,
+      ImageData {
+        width,
+        height,
+        pixel_format,
+        color_space,
+        data: v8::TracedReference::new(scope, data),
+      },
+    ))
+  }
+}
+
 // SAFETY: we're sure `ImageData` can be GCed.
 unsafe impl GarbageCollected for ImageData {
   fn trace(&self, visitor: &mut v8::cppgc::Visitor) {

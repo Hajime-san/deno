@@ -1,6 +1,10 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
-import { assertEquals, assertStrictEquals } from "./test_util.ts";
+import {
+  assertEquals,
+  assertNotStrictEquals,
+  assertStrictEquals,
+} from "./test_util.ts";
 
 Deno.test(function imageDataInitializedWithSourceWidthAndHeight() {
   const imageData = new ImageData(16, 9);
@@ -69,6 +73,27 @@ Deno.test(
     assertEquals(imageData.colorSpace, "srgb");
   },
 );
+
+Deno.test(function imageDataSerializable() {
+  const original = new ImageData(2, 1, {
+    colorSpace: "display-p3",
+  });
+  original.data.set([1, 2, 3, 4, 5, 6, 7, 8]);
+
+  const clone = structuredClone(original);
+
+  assertNotStrictEquals(clone, original);
+  assertStrictEquals(clone.constructor, ImageData);
+  assertEquals(clone.width, 2);
+  assertEquals(clone.height, 1);
+  assertEquals(clone.colorSpace, "display-p3");
+  assertEquals(clone.pixelFormat, "rgba-unorm8");
+  assertEquals(clone.data, original.data);
+  assertNotStrictEquals(clone.data, original.data);
+
+  clone.data[0] = 255;
+  assertEquals(original.data[0], 1);
+});
 
 Deno.test(
   async function imageDataUsedInWorker() {

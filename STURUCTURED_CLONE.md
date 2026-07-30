@@ -95,3 +95,8 @@
 
   // return ScriptValue(isolate,
   //                    unpacked->Deserialize(isolate, deserialize_options));
+
+バイナリ区別のためのタグ実装
+// https://source.chromium.org/chromium/chromium/src/+/main:third_party/blink/renderer/bindings/core/v8/serialization/v8_script_value_serializer.cc
+// https://source.chromium.org/chromium/chromium/src/+/main:third_party/blink/renderer/bindings/core/v8/serialization/v8_script_value_deserializer.cc
+// https://source.chromium.org/chromium/chromium/src/+/main:third_party/blink/renderer/bindings/core/v8/serialization/serialization_tag.h
