@@ -13,24 +13,30 @@ use crate::image_data::ImageData;
 // https://source.chromium.org/chromium/chromium/src/+/main:third_party/blink/renderer/bindings/core/v8/serialization/v8_script_value_deserializer.cc
 // https://source.chromium.org/chromium/chromium/src/+/main:third_party/blink/renderer/bindings/core/v8/serialization/serialization_tag.h
 
-// Version of the Deno-controlled envelope and all host-object payloads below.
-// This becomes a compatibility boundary when serialized values outlive the
-// current runtime. In particular, IndexedDB stores values produced by
-// StructuredSerializeForStorage and may read them after Deno is upgraded:
-// https://w3c.github.io/IndexedDB/#value-construct
+/// Version of the Deno-controlled envelope and all host-object payloads. It is
+/// the backward-compatibility boundary for bytes that outlive the runtime that
+/// wrote them. In particular, IndexedDB stores values produced by
+/// StructuredSerializeForStorage and a newer Deno may read those values later:
+/// https://w3c.github.io/IndexedDB/#value-construct
+///
+/// New readers must therefore preserve decoding of older payloads. `ImageData` is
+/// an example of how to evolve a payload compatibly: its settings are optional
+/// subtags terminated by End. If an older payload has no `PredefinedColorSpace` or
+/// `PixelFormat` subtag, the reader falls back to the Web API defaults, `srgb` and
+/// `rgba-unorm8`. Adding another optional subtag with a compatible default does
+/// not require a version bump. This guarantees new-reader/old-data compatibility;
+/// it does not require an old reader to understand a new subtag.
 //
-// Bump this version when making an incompatible wire-format change, such as:
-// - changing the order, width, encoding, or meaning of existing payload data;
-// - changing the interpretation of an existing host-object tag or subtag;
-// - adding, removing, or changing a required field without a compatible
-//   default.
-// A new self-contained host-object tag or a backward-compatible optional
-// subtag does not by itself require a version bump.
-//
-// When bumping the version, each affected host-object reader must branch at
-// the version boundary and retain its old decoding path for stored payloads.
-// Readers for unaffected objects should continue using the same decoding path
-// for both the old and new versions.
+/// Bump this version when old bytes require a different interpretation, such as:
+/// - changing the order, width, encoding, or meaning of existing payload data;
+/// - changing the interpretation of an existing host-object tag or subtag;
+/// - adding, removing, or changing a required field without a compatible
+///   default.
+/// A new self-contained host-object tag also does not by itself require a bump.
+///
+/// When bumping the version, each affected host-object reader must branch at
+/// the version boundary and retain the old decoding path for stored payloads.
+/// Unaffected readers continue using the same path for both versions.
 const WEB_STRUCTURED_CLONE_WIRE_FORMAT_VERSION: u32 = 1;
 
 // Host-object tags are written as exactly one raw byte before the type-specific
@@ -192,6 +198,7 @@ mod tests {
   //   decoder tests because persisted values may contain the old V8 payload.
   // A failure of the encoder test therefore requires determining whether the
   // Deno-controlled bytes changed before deciding whether to bump its version.
+
   const IMAGE_DATA_V1_V8_16: &[u8] = &[
     b'D', b'E', b'N', b'O', // Deno embedder magic
     0x01, // Deno wire format version 1
