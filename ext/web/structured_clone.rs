@@ -1,10 +1,13 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
 use deno_core::StructuredCloneHostObjectRegistry;
+use deno_core::is_structured_clone_host_object;
 use deno_core::op2;
+use deno_core::read_structured_clone_host_object;
 use deno_core::structured_deserialize;
 use deno_core::structured_serialize_internal;
 use deno_core::v8;
+use deno_core::write_structured_clone_host_object;
 use deno_error::JsErrorBox;
 
 use crate::image_data::ImageData;
@@ -26,12 +29,13 @@ use crate::image_data::ImageData;
 /// `rgba-unorm8`. Adding another optional subtag with a compatible default does
 /// not require a version bump. This guarantees new-reader/old-data compatibility;
 /// it does not require an old reader to understand a new subtag.
-//
+///
 /// Bump this version when old bytes require a different interpretation, such as:
 /// - changing the order, width, encoding, or meaning of existing payload data;
 /// - changing the interpretation of an existing host-object tag or subtag;
 /// - adding, removing, or changing a required field without a compatible
 ///   default.
+///
 /// A new self-contained host-object tag also does not by itself require a bump.
 ///
 /// When bumping the version, each affected host-object reader must branch at
@@ -44,7 +48,7 @@ const WEB_STRUCTURED_CLONE_WIRE_FORMAT_VERSION: u32 = 1;
 // implicit discriminant, or reuse a retired value.
 #[derive(Clone, Copy)]
 #[repr(u8)]
-enum StructuredCloneHostObject {
+enum StructuredCloneHostObjectTag {
   // settings:(ImageDataSerializationTag, value)*, End, width:uint32,
   // height:uint32, data:V8 value -> ImageData (ref)
   ImageData = b'#',
@@ -52,7 +56,7 @@ enum StructuredCloneHostObject {
   // never be assigned to another host object.
 }
 
-impl StructuredCloneHostObject {
+impl StructuredCloneHostObjectTag {
   const ALL: &[Self] = &[Self::ImageData];
 
   fn from_tag(tag: u8) -> Option<Self> {
@@ -69,7 +73,7 @@ impl StructuredCloneHostObject {
   ) -> bool {
     match self {
       Self::ImageData => {
-        ImageData::is_structured_clone_host_object(scope, object)
+        is_structured_clone_host_object::<ImageData>(scope, object)
       }
     }
   }
@@ -81,9 +85,9 @@ impl StructuredCloneHostObject {
     serializer: &dyn v8::ValueSerializerHelper,
   ) -> Option<bool> {
     match self {
-      Self::ImageData => {
-        ImageData::write_structured_clone_payload(scope, object, serializer)
-      }
+      Self::ImageData => write_structured_clone_host_object::<ImageData>(
+        scope, object, serializer,
+      ),
     }
   }
 
@@ -91,12 +95,14 @@ impl StructuredCloneHostObject {
     self,
     scope: &mut v8::PinScope<'s, 'i>,
     deserializer: &dyn v8::ValueDeserializerHelper,
-    _wire_format_version: u32,
+    wire_format_version: u32,
   ) -> Option<v8::Local<'s, v8::Object>> {
     match self {
-      Self::ImageData => {
-        ImageData::read_structured_clone_payload(scope, deserializer)
-      }
+      Self::ImageData => read_structured_clone_host_object::<ImageData>(
+        scope,
+        deserializer,
+        wire_format_version,
+      ),
     }
   }
 }
@@ -118,7 +124,7 @@ impl StructuredCloneHostObjectRegistry
     scope: &mut v8::PinScope<'s, 'i>,
     object: v8::Local<'s, v8::Object>,
   ) -> bool {
-    StructuredCloneHostObject::ALL
+    StructuredCloneHostObjectTag::ALL
       .iter()
       .copied()
       .any(|host_object| host_object.is_host_object(scope, object))
@@ -130,7 +136,7 @@ impl StructuredCloneHostObjectRegistry
     object: v8::Local<'s, v8::Object>,
     serializer: &dyn v8::ValueSerializerHelper,
   ) -> Option<bool> {
-    let host_object = StructuredCloneHostObject::ALL
+    let host_object = StructuredCloneHostObjectTag::ALL
       .iter()
       .copied()
       .find(|host_object| host_object.is_host_object(scope, object))?;
@@ -145,7 +151,7 @@ impl StructuredCloneHostObjectRegistry
     wire_format_version: u32,
   ) -> Option<v8::Local<'s, v8::Object>> {
     let tag = *deserializer.read_raw_bytes(1)?.first()?;
-    StructuredCloneHostObject::from_tag(tag)?.read_payload(
+    StructuredCloneHostObjectTag::from_tag(tag)?.read_payload(
       scope,
       deserializer,
       wire_format_version,
@@ -182,6 +188,7 @@ mod tests {
   use deno_core::JsRuntime;
   use deno_core::RuntimeOptions;
   use deno_core::SerializedValue;
+  use deno_core::is_structured_clone_host_object;
   use deno_core::v8;
 
   use super::HOST_OBJECT_REGISTRY;
@@ -287,7 +294,7 @@ mod tests {
     .unwrap();
     let object = value.try_cast::<v8::Object>().unwrap();
 
-    assert!(ImageData::is_structured_clone_host_object(scope, object));
+    assert!(is_structured_clone_host_object::<ImageData>(scope, object));
     assert_eq!(
       get_property(scope, object, "width")
         .uint32_value(scope)

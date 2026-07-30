@@ -8,7 +8,8 @@ use proc_macro::TokenStream;
 mod conversion;
 mod cppgc;
 mod op2;
-mod webidl;
+#[path = "webidl/mod.rs"]
+mod webidl_derive;
 
 #[proc_macro_derive(CppgcInherits, attributes(cppgc_inherits_from))]
 pub fn cppgc_inherits(item: TokenStream) -> TokenStream {
@@ -35,8 +36,17 @@ fn op2_macro(attr: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 #[proc_macro_derive(WebIDL, attributes(webidl, options))]
-pub fn webidl(item: TokenStream) -> TokenStream {
-  match webidl::webidl(item.into()) {
+pub fn derive_webidl(item: TokenStream) -> TokenStream {
+  match webidl_derive::webidl(item.into()) {
+    Ok(output) => output.into(),
+    Err(err) => err.into_compile_error().into(),
+  }
+}
+
+/// Marks a Rust type as implementing the Web IDL `[Serializable]` contract.
+#[proc_macro_attribute]
+pub fn webidl(attr: TokenStream, item: TokenStream) -> TokenStream {
+  match webidl_derive::webidl_attribute(attr.into(), item.into()) {
     Ok(output) => output.into(),
     Err(err) => err.into_compile_error().into(),
   }

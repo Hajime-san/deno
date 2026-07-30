@@ -10,6 +10,7 @@ use syn::Attribute;
 use syn::Data;
 use syn::DeriveInput;
 use syn::Error;
+use syn::ItemStruct;
 use syn::Token;
 use syn::parse::Parse;
 use syn::parse::ParseStream;
@@ -59,6 +60,41 @@ pub fn webidl(item: TokenStream) -> Result<TokenStream, Error> {
   };
 
   Ok(out)
+}
+
+pub fn webidl_attribute(
+  attr: TokenStream,
+  item: TokenStream,
+) -> Result<TokenStream, Error> {
+  parse2::<SerializableAttribute>(attr)?;
+  let item = parse2::<ItemStruct>(item)?;
+  let ident = &item.ident;
+  let (impl_generics, type_generics, where_clause) =
+    item.generics.split_for_impl();
+
+  Ok(quote! {
+    #item
+
+    impl #impl_generics ::deno_core::WebIdlSerializable
+      for #ident #type_generics #where_clause
+    {
+    }
+  })
+}
+
+struct SerializableAttribute;
+
+impl Parse for SerializableAttribute {
+  fn parse(input: ParseStream) -> syn::Result<Self> {
+    let ident = input.parse::<syn::Ident>()?;
+    if ident != "serializable" {
+      return Err(Error::new(ident.span(), "expected `serializable`"));
+    }
+    if !input.is_empty() {
+      return Err(input.error("unexpected tokens after `serializable`"));
+    }
+    Ok(Self)
+  }
 }
 
 mod kw {

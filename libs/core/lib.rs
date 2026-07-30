@@ -56,6 +56,7 @@ pub use deno_ops::FromV8;
 pub use deno_ops::ToV8;
 pub use deno_ops::WebIDL;
 pub use deno_ops::op2;
+pub use deno_ops::webidl;
 pub use deno_path_util::normalize_path;
 pub use deno_path_util::resolve_path;
 pub use deno_path_util::resolve_url_or_path;
@@ -208,9 +209,14 @@ pub use crate::source_map::SourceMapper;
 pub use crate::tasks::V8CrossThreadTaskSpawner;
 pub use crate::tasks::V8TaskSpawner;
 pub use crate::web_serialize_deserialize::SerializedValue;
+pub use crate::web_serialize_deserialize::StructuredCloneHostObject;
 pub use crate::web_serialize_deserialize::StructuredCloneHostObjectRegistry;
+pub use crate::web_serialize_deserialize::WebIdlSerializable;
+pub use crate::web_serialize_deserialize::is_structured_clone_host_object;
+pub use crate::web_serialize_deserialize::read_structured_clone_host_object;
 pub use crate::web_serialize_deserialize::structured_deserialize;
 pub use crate::web_serialize_deserialize::structured_serialize_internal;
+pub use crate::web_serialize_deserialize::write_structured_clone_host_object;
 
 // Ensure we can use op2 in deno_core without any hackery.
 extern crate self as deno_core;

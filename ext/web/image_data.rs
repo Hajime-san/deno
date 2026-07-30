@@ -3,9 +3,11 @@
 use std::borrow::Cow;
 
 use deno_core::GarbageCollected;
+use deno_core::StructuredCloneHostObject;
 use deno_core::WebIDL;
 use deno_core::op2;
 use deno_core::v8;
+use deno_core::webidl;
 use deno_core::webidl::ContextFn;
 use deno_core::webidl::IntOptions;
 use deno_core::webidl::WebIdlConverter;
@@ -105,6 +107,7 @@ pub struct ImageDataSettings {
   pixel_format: ImageDataPixelFormat,
 }
 
+#[webidl(serializable)]
 pub struct ImageData {
   width: u32,
   height: u32,
@@ -200,49 +203,33 @@ impl SerializedImageDataPixelFormat {
   }
 }
 
-impl ImageData {
-  pub(crate) fn is_structured_clone_host_object<'s, 'i>(
+impl StructuredCloneHostObject for ImageData {
+  fn write_structured_clone_payload<'s, 'i>(
+    &self,
     scope: &mut v8::PinScope<'s, 'i>,
-    object: v8::Local<'s, v8::Object>,
-  ) -> bool {
-    deno_core::cppgc::try_unwrap_cppgc_object::<ImageData>(scope, object.into())
-      .is_some()
-  }
-
-  pub(crate) fn write_structured_clone_payload<'s, 'i>(
-    scope: &mut v8::PinScope<'s, 'i>,
-    object: v8::Local<'s, v8::Object>,
     serializer: &dyn v8::ValueSerializerHelper,
   ) -> Option<bool> {
-    let image_data = deno_core::cppgc::try_unwrap_cppgc_object::<ImageData>(
-      scope,
-      object.into(),
-    )?;
-    // SAFETY: `object` remains live for this V8 serializer callback.
-    let image_data = unsafe { image_data.as_ref() };
-
     serializer
       .write_uint32(ImageDataSerializationTag::PredefinedColorSpace as u32);
     serializer.write_uint32(SerializedPredefinedColorSpace::from_color_space(
-      image_data.color_space,
+      self.color_space,
     ) as u32);
     serializer.write_uint32(ImageDataSerializationTag::PixelFormat as u32);
     serializer.write_uint32(SerializedImageDataPixelFormat::from_pixel_format(
-      image_data.pixel_format,
+      self.pixel_format,
     ) as u32);
     serializer.write_uint32(ImageDataSerializationTag::End as u32);
-    serializer.write_uint32(image_data.width);
-    serializer.write_uint32(image_data.height);
-    serializer.write_value(
-      scope.get_current_context(),
-      image_data.data.get(scope)?.into(),
-    )
+    serializer.write_uint32(self.width);
+    serializer.write_uint32(self.height);
+    serializer
+      .write_value(scope.get_current_context(), self.data.get(scope)?.into())
   }
 
-  pub(crate) fn read_structured_clone_payload<'s, 'i>(
+  fn read_structured_clone_payload<'s, 'i>(
     scope: &mut v8::PinScope<'s, 'i>,
     deserializer: &dyn v8::ValueDeserializerHelper,
-  ) -> Option<v8::Local<'s, v8::Object>> {
+    _wire_format_version: u32,
+  ) -> Option<Self> {
     let mut pixel_format = ImageDataPixelFormat::RgbaUnorm8;
     let mut color_space = PredefinedColorSpace::Srgb;
     loop {
@@ -294,16 +281,13 @@ impl ImageData {
       return None;
     }
 
-    Some(deno_core::cppgc::make_cppgc_object(
-      scope,
-      ImageData {
-        width,
-        height,
-        pixel_format,
-        color_space,
-        data: v8::TracedReference::new(scope, data),
-      },
-    ))
+    Some(ImageData {
+      width,
+      height,
+      pixel_format,
+      color_space,
+      data: v8::TracedReference::new(scope, data),
+    })
   }
 }
 
