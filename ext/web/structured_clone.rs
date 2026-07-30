@@ -13,18 +13,45 @@ use crate::image_data::ImageData;
 // https://source.chromium.org/chromium/chromium/src/+/main:third_party/blink/renderer/bindings/core/v8/serialization/v8_script_value_deserializer.cc
 // https://source.chromium.org/chromium/chromium/src/+/main:third_party/blink/renderer/bindings/core/v8/serialization/serialization_tag.h
 
+// Version of the Deno-controlled envelope and all host-object payloads below.
+// This becomes a compatibility boundary when serialized values outlive the
+// current runtime. In particular, IndexedDB stores values produced by
+// StructuredSerializeForStorage and may read them after Deno is upgraded:
+// https://w3c.github.io/IndexedDB/#value-construct
+//
+// Bump this version when making an incompatible wire-format change, such as:
+// - changing the order, width, encoding, or meaning of existing payload data;
+// - changing the interpretation of an existing host-object tag or subtag;
+// - adding, removing, or changing a required field without a compatible
+//   default.
+// A new self-contained host-object tag or a backward-compatible optional
+// subtag does not by itself require a version bump.
+//
+// When bumping the version, each affected host-object reader must branch at
+// the version boundary and retain its old decoding path for stored payloads.
+// Readers for unaffected objects should continue using the same decoding path
+// for both the old and new versions.
+const WEB_STRUCTURED_CLONE_WIRE_FORMAT_VERSION: u32 = 1;
+
+// Host-object tags are written as exactly one raw byte before the type-specific
+// payload. Values are permanent wire identifiers: never renumber, reorder by
+// implicit discriminant, or reuse a retired value.
 #[derive(Clone, Copy)]
-#[repr(u32)]
+#[repr(u8)]
 enum StructuredCloneHostObject {
-  ImageData = 1,
+  // settings:(ImageDataSerializationTag, value)*, End, width:uint32,
+  // height:uint32, data:V8 value -> ImageData (ref)
+  ImageData = b'#',
+  // Retired tags must remain reserved as `Deprecated...` variants and must
+  // never be assigned to another host object.
 }
 
 impl StructuredCloneHostObject {
   const ALL: &[Self] = &[Self::ImageData];
 
-  fn from_tag(tag: u32) -> Option<Self> {
+  fn from_tag(tag: u8) -> Option<Self> {
     match tag {
-      tag if tag == Self::ImageData as u32 => Some(Self::ImageData),
+      tag if tag == Self::ImageData as u8 => Some(Self::ImageData),
       _ => None,
     }
   }
@@ -58,6 +85,7 @@ impl StructuredCloneHostObject {
     self,
     scope: &mut v8::PinScope<'s, 'i>,
     deserializer: &dyn v8::ValueDeserializerHelper,
+    _wire_format_version: u32,
   ) -> Option<v8::Local<'s, v8::Object>> {
     match self {
       Self::ImageData => {
@@ -75,6 +103,10 @@ static HOST_OBJECT_REGISTRY: WebStructuredCloneHostObjectRegistry =
 impl StructuredCloneHostObjectRegistry
   for WebStructuredCloneHostObjectRegistry
 {
+  fn wire_format_version(&self) -> u32 {
+    WEB_STRUCTURED_CLONE_WIRE_FORMAT_VERSION
+  }
+
   fn is_host_object<'s, 'i>(
     &self,
     scope: &mut v8::PinScope<'s, 'i>,
@@ -96,7 +128,7 @@ impl StructuredCloneHostObjectRegistry
       .iter()
       .copied()
       .find(|host_object| host_object.is_host_object(scope, object))?;
-    serializer.write_uint32(host_object as u32);
+    serializer.write_raw_bytes(&[host_object as u8]);
     host_object.write_payload(scope, object, serializer)
   }
 
@@ -104,12 +136,14 @@ impl StructuredCloneHostObjectRegistry
     &self,
     scope: &mut v8::PinScope<'s, 'i>,
     deserializer: &dyn v8::ValueDeserializerHelper,
+    wire_format_version: u32,
   ) -> Option<v8::Local<'s, v8::Object>> {
-    let mut tag = 0;
-    if !deserializer.read_uint32(&mut tag) {
-      return None;
-    }
-    StructuredCloneHostObject::from_tag(tag)?.read_payload(scope, deserializer)
+    let tag = *deserializer.read_raw_bytes(1)?.first()?;
+    StructuredCloneHostObject::from_tag(tag)?.read_payload(
+      scope,
+      deserializer,
+      wire_format_version,
+    )
   }
 }
 

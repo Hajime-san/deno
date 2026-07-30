@@ -95,6 +95,21 @@ Deno.test(function imageDataSerializable() {
   assertEquals(original.data[0], 1);
 });
 
+Deno.test(function float16ImageDataSerializable() {
+  const original = new ImageData(1, 1, {
+    pixelFormat: "rgba-float16",
+  });
+  original.data.set([1, 2, 3, 4]);
+
+  const clone = structuredClone(original);
+
+  assertStrictEquals(clone.data.constructor, Float16Array);
+  assertEquals(clone.pixelFormat, "rgba-float16");
+  assertEquals(clone.colorSpace, "srgb");
+  assertEquals(clone.data, original.data);
+  assertNotStrictEquals(clone.data, original.data);
+});
+
 Deno.test(
   async function imageDataUsedInWorker() {
     const { promise, resolve } = Promise.withResolvers<void>();

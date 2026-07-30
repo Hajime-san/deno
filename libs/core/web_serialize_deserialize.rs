@@ -29,11 +29,26 @@ pub enum SerializedValue<'s> {
   V8(Vec<u8>),
 }
 
+// Deno wraps V8's serialized data in an embedder-controlled version envelope:
+//
+//   "DENO" | embedder version:uint32(varint) | V8 header | V8 payload
+//
+// The outer version covers Deno host-object tags and payloads, while the inner
+// V8 header carries V8's independently versioned wire format. The envelope is
+// consumed before constructing the V8 deserializer. The multi-byte magic does
+// not collide with V8's 0xFF version header, so an unversioned legacy payload
+// can be distinguished if compatibility is needed later. Increment the
+// registry's version whenever an existing Deno payload changes incompatibly.
+const EMBEDDER_MAGIC: &[u8; 4] = b"DENO";
+
 /// Hooks for platform objects whose serialization is defined by the embedder.
 ///
 /// The hooks are called by V8 while it walks a single object graph, so they
 /// must write and read exactly one host-object record per invocation.
 pub trait StructuredCloneHostObjectRegistry {
+  /// Version of the embedder-controlled wire format wrapped around V8 data.
+  fn wire_format_version(&self) -> u32;
+
   fn is_host_object<'s, 'i>(
     &self,
     scope: &mut v8::PinScope<'s, 'i>,
@@ -51,6 +66,7 @@ pub trait StructuredCloneHostObjectRegistry {
     &self,
     scope: &mut v8::PinScope<'s, 'i>,
     deserializer: &dyn v8::ValueDeserializerHelper,
+    wire_format_version: u32,
   ) -> Option<v8::Local<'s, v8::Object>>;
 }
 
@@ -96,38 +112,11 @@ where
       .host_objects
       .write_host_object(scope, object, serializer)
   }
-
-  // fn get_shared_array_buffer_id<'s, 'i>(
-  //   &self,
-  //   scope: &mut v8::PinScope<'s, 'i>,
-  //   shared_array_buffer: v8::Local<'s, v8::SharedArrayBuffer>,
-  // ) -> Option<u32> {
-  //   // Broadcast mode: carry the backing store out-of-band and use its index in
-  //   // the list as the transfer id.
-  //   if let Some(broadcast) = &self.broadcast_shared_array_buffers {
-  //     let backing_store = shared_array_buffer.get_backing_store();
-  //     let mut list = broadcast.borrow_mut();
-  //     let id = list.len() as u32;
-  //     list.push(backing_store);
-  //     return Some(id);
-  //   }
-  //   if self.for_storage {
-  //     return None;
-  //   }
-  //   let state = JsRuntime::state_from(scope);
-  //   match &state.shared_array_buffer_store {
-  //     Some(shared_array_buffer_store) => {
-  //       let backing_store = shared_array_buffer.get_backing_store();
-  //       let id = shared_array_buffer_store.insert(backing_store);
-  //       Some(id)
-  //     }
-  //     _ => None,
-  //   }
-  // }
 }
 
 struct V8DeserializerDelegate<'a, R> {
   host_objects: &'a R,
+  wire_format_version: u32,
 }
 
 impl<R> v8::ValueDeserializerImpl for V8DeserializerDelegate<'_, R>
@@ -139,7 +128,11 @@ where
     scope: &mut v8::PinScope<'s, 'i>,
     deserializer: &dyn v8::ValueDeserializerHelper,
   ) -> Option<v8::Local<'s, v8::Object>> {
-    self.host_objects.read_host_object(scope, deserializer)
+    self.host_objects.read_host_object(
+      scope,
+      deserializer,
+      self.wire_format_version,
+    )
   }
 }
 
@@ -193,6 +186,8 @@ where
       host_objects,
     }),
   );
+  serializer.write_raw_bytes(EMBEDDER_MAGIC);
+  serializer.write_uint32(host_objects.wire_format_version());
   serializer.write_header();
 
   v8::tc_scope!(let tc_scope, scope);
@@ -239,9 +234,20 @@ fn deserialize_v8_graph<'s, 'i, R>(
 where
   R: StructuredCloneHostObjectRegistry,
 {
+  let (wire_format_version, bytes) = read_embedder_envelope(bytes)?;
+  if wire_format_version == 0
+    || wire_format_version > host_objects.wire_format_version()
+  {
+    return Err(JsErrorBox::range_error(format!(
+      "Unsupported structured clone wire format version {wire_format_version}"
+    )));
+  }
   let deserializer = v8::ValueDeserializer::new(
     scope,
-    Box::new(V8DeserializerDelegate { host_objects }),
+    Box::new(V8DeserializerDelegate {
+      host_objects,
+      wire_format_version,
+    }),
     bytes,
   );
   if !deserializer.read_header(target_realm).unwrap_or_default() {
@@ -250,4 +256,61 @@ where
   deserializer
     .read_value(target_realm)
     .ok_or_else(|| JsErrorBox::range_error("Cannot read deserialize value"))
+}
+
+fn read_embedder_envelope(bytes: &[u8]) -> Result<(u32, &[u8]), JsErrorBox> {
+  if !bytes.starts_with(EMBEDDER_MAGIC) {
+    return Err(JsErrorBox::range_error(
+      "Cannot deserialize structured clone magic",
+    ));
+  }
+
+  let mut version = 0u32;
+  for index in 0..5 {
+    let byte = *bytes.get(EMBEDDER_MAGIC.len() + index).ok_or_else(|| {
+      JsErrorBox::range_error("Cannot deserialize structured clone version")
+    })?;
+    let value = (byte & 0x7F) as u32;
+    if index == 4 && (value > 0x0F || byte & 0x80 != 0) {
+      break;
+    }
+    version |= value << (index * 7);
+    if byte & 0x80 == 0 {
+      return Ok((version, &bytes[EMBEDDER_MAGIC.len() + index + 1..]));
+    }
+  }
+
+  Err(JsErrorBox::range_error(
+    "Cannot deserialize structured clone version",
+  ))
+}
+
+#[cfg(test)]
+mod tests {
+  use super::EMBEDDER_MAGIC;
+  use super::read_embedder_envelope;
+
+  #[test]
+  fn reads_embedder_envelope() {
+    let payload = [0xFF, 0x0F];
+    let bytes = [EMBEDDER_MAGIC.as_slice(), &[1], &payload].concat();
+    let (version, remaining) = read_embedder_envelope(&bytes).unwrap();
+    assert_eq!(version, 1);
+    assert_eq!(remaining, payload);
+
+    let bytes =
+      [EMBEDDER_MAGIC.as_slice(), &[0xAC, 0x02], &payload[..1]].concat();
+    let (version, remaining) = read_embedder_envelope(&bytes).unwrap();
+    assert_eq!(version, 300);
+    assert_eq!(remaining, &payload[..1]);
+  }
+
+  #[test]
+  fn rejects_invalid_embedder_envelope() {
+    assert!(read_embedder_envelope(&[]).is_err());
+    assert!(read_embedder_envelope(EMBEDDER_MAGIC).is_err());
+    let invalid_version =
+      [EMBEDDER_MAGIC.as_slice(), &[0x80, 0x80, 0x80, 0x80, 0x10]].concat();
+    assert!(read_embedder_envelope(&invalid_version).is_err());
+  }
 }

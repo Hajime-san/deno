@@ -113,6 +113,93 @@ pub struct ImageData {
   data: v8::TracedReference<v8::Object>,
 }
 
+// ImageData begins with a variable settings sequence. Each setting is encoded
+// as a uint32(varint) subtag followed by its uint32(varint) value. End has no
+// value and terminates the sequence. The fixed width, height, and V8-serialized
+// typed array follow it. Missing settings use the Web API defaults, allowing
+// new optional settings to be appended without changing the fixed payload.
+// Subtag values are permanent and must remain reserved after retirement.
+#[derive(Clone, Copy)]
+#[repr(u32)]
+enum ImageDataSerializationTag {
+  // No value; terminates the settings sequence.
+  End = 0,
+  // Followed by SerializedPredefinedColorSpace.
+  PredefinedColorSpace = 1,
+  // Followed by SerializedImageDataPixelFormat.
+  PixelFormat = 2,
+  // Retired subtags must remain reserved and must never be reused.
+}
+
+impl ImageDataSerializationTag {
+  fn from_u32(value: u32) -> Option<Self> {
+    match value {
+      value if value == Self::End as u32 => Some(Self::End),
+      value if value == Self::PredefinedColorSpace as u32 => {
+        Some(Self::PredefinedColorSpace)
+      }
+      value if value == Self::PixelFormat as u32 => Some(Self::PixelFormat),
+      _ => None,
+    }
+  }
+}
+
+// Stable wire values, deliberately separate from the WebIDL enum declaration.
+#[derive(Clone, Copy)]
+#[repr(u32)]
+enum SerializedPredefinedColorSpace {
+  Srgb = 0,
+  DisplayP3 = 1,
+}
+
+impl SerializedPredefinedColorSpace {
+  fn from_color_space(value: PredefinedColorSpace) -> Self {
+    match value {
+      PredefinedColorSpace::Srgb => Self::Srgb,
+      PredefinedColorSpace::DisplayP3 => Self::DisplayP3,
+    }
+  }
+
+  fn into_color_space(value: u32) -> Option<PredefinedColorSpace> {
+    match value {
+      value if value == Self::Srgb as u32 => Some(PredefinedColorSpace::Srgb),
+      value if value == Self::DisplayP3 as u32 => {
+        Some(PredefinedColorSpace::DisplayP3)
+      }
+      _ => None,
+    }
+  }
+}
+
+// Stable wire values, deliberately separate from the WebIDL enum declaration.
+#[derive(Clone, Copy)]
+#[repr(u32)]
+enum SerializedImageDataPixelFormat {
+  RgbaUnorm8 = 0,
+  RgbaFloat16 = 1,
+}
+
+impl SerializedImageDataPixelFormat {
+  fn from_pixel_format(value: ImageDataPixelFormat) -> Self {
+    match value {
+      ImageDataPixelFormat::RgbaUnorm8 => Self::RgbaUnorm8,
+      ImageDataPixelFormat::RgbaFloat16 => Self::RgbaFloat16,
+    }
+  }
+
+  fn into_pixel_format(value: u32) -> Option<ImageDataPixelFormat> {
+    match value {
+      value if value == Self::RgbaUnorm8 as u32 => {
+        Some(ImageDataPixelFormat::RgbaUnorm8)
+      }
+      value if value == Self::RgbaFloat16 as u32 => {
+        Some(ImageDataPixelFormat::RgbaFloat16)
+      }
+      _ => None,
+    }
+  }
+}
+
 impl ImageData {
   pub(crate) fn is_structured_clone_host_object<'s, 'i>(
     scope: &mut v8::PinScope<'s, 'i>,
@@ -134,10 +221,18 @@ impl ImageData {
     // SAFETY: `object` remains live for this V8 serializer callback.
     let image_data = unsafe { image_data.as_ref() };
 
+    serializer
+      .write_uint32(ImageDataSerializationTag::PredefinedColorSpace as u32);
+    serializer.write_uint32(SerializedPredefinedColorSpace::from_color_space(
+      image_data.color_space,
+    ) as u32);
+    serializer.write_uint32(ImageDataSerializationTag::PixelFormat as u32);
+    serializer.write_uint32(SerializedImageDataPixelFormat::from_pixel_format(
+      image_data.pixel_format,
+    ) as u32);
+    serializer.write_uint32(ImageDataSerializationTag::End as u32);
     serializer.write_uint32(image_data.width);
     serializer.write_uint32(image_data.height);
-    serializer.write_uint32(image_data.pixel_format as u32);
-    serializer.write_uint32(image_data.color_space as u32);
     serializer.write_value(
       scope.get_current_context(),
       image_data.data.get(scope)?.into(),
@@ -148,28 +243,41 @@ impl ImageData {
     scope: &mut v8::PinScope<'s, 'i>,
     deserializer: &dyn v8::ValueDeserializerHelper,
   ) -> Option<v8::Local<'s, v8::Object>> {
+    let mut pixel_format = ImageDataPixelFormat::RgbaUnorm8;
+    let mut color_space = PredefinedColorSpace::Srgb;
+    loop {
+      let mut tag = 0;
+      if !deserializer.read_uint32(&mut tag) {
+        return None;
+      }
+      match ImageDataSerializationTag::from_u32(tag)? {
+        ImageDataSerializationTag::End => break,
+        ImageDataSerializationTag::PredefinedColorSpace => {
+          let mut value = 0;
+          if !deserializer.read_uint32(&mut value) {
+            return None;
+          }
+          color_space =
+            SerializedPredefinedColorSpace::into_color_space(value)?;
+        }
+        ImageDataSerializationTag::PixelFormat => {
+          let mut value = 0;
+          if !deserializer.read_uint32(&mut value) {
+            return None;
+          }
+          pixel_format =
+            SerializedImageDataPixelFormat::into_pixel_format(value)?;
+        }
+      }
+    }
+
     let mut width = 0;
     let mut height = 0;
-    let mut pixel_format = 0;
-    let mut color_space = 0;
     if !deserializer.read_uint32(&mut width)
       || !deserializer.read_uint32(&mut height)
-      || !deserializer.read_uint32(&mut pixel_format)
-      || !deserializer.read_uint32(&mut color_space)
     {
       return None;
     }
-
-    let pixel_format = match pixel_format {
-      0 => ImageDataPixelFormat::RgbaUnorm8,
-      1 => ImageDataPixelFormat::RgbaFloat16,
-      _ => return None,
-    };
-    let color_space = match color_space {
-      0 => PredefinedColorSpace::Srgb,
-      1 => PredefinedColorSpace::DisplayP3,
-      _ => return None,
-    };
     let data = deserializer
       .read_value(scope.get_current_context())?
       .try_cast::<v8::Object>()
