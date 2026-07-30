@@ -41,6 +41,15 @@ pub enum SerializedValue<'s> {
 // registry's version whenever an existing Deno payload changes incompatibly.
 const EMBEDDER_MAGIC: &[u8; 4] = b"DENO";
 
+// V8's WriteUint32 uses a base-128 varint: each byte contributes seven value
+// bits and the high bit indicates that another byte follows. Four bytes carry
+// 28 bits, so a u32 may use a fifth byte, whose value is limited to four bits.
+const VARINT_VALUE_MASK: u8 = 0x7F;
+const VARINT_CONTINUATION_BIT: u8 = 0x80;
+const VARINT_VALUE_BITS_PER_BYTE: usize = 7;
+const U32_VARINT_MAX_BYTES: usize = 5;
+const U32_VARINT_LAST_BYTE_MAX: u8 = 0x0F;
+
 /// Hooks for platform objects whose serialization is defined by the embedder.
 ///
 /// The hooks are called by V8 while it walks a single object graph, so they
@@ -266,16 +275,19 @@ fn read_embedder_envelope(bytes: &[u8]) -> Result<(u32, &[u8]), JsErrorBox> {
   }
 
   let mut version = 0u32;
-  for index in 0..5 {
+  for index in 0..U32_VARINT_MAX_BYTES {
     let byte = *bytes.get(EMBEDDER_MAGIC.len() + index).ok_or_else(|| {
       JsErrorBox::range_error("Cannot deserialize structured clone version")
     })?;
-    let value = (byte & 0x7F) as u32;
-    if index == 4 && (value > 0x0F || byte & 0x80 != 0) {
+    let value = byte & VARINT_VALUE_MASK;
+    if index == U32_VARINT_MAX_BYTES - 1
+      && (value > U32_VARINT_LAST_BYTE_MAX
+        || byte & VARINT_CONTINUATION_BIT != 0)
+    {
       break;
     }
-    version |= value << (index * 7);
-    if byte & 0x80 == 0 {
+    version |= (value as u32) << (index * VARINT_VALUE_BITS_PER_BYTE);
+    if byte & VARINT_CONTINUATION_BIT == 0 {
       return Ok((version, &bytes[EMBEDDER_MAGIC.len() + index + 1..]));
     }
   }
