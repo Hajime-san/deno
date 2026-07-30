@@ -1,7 +1,10 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
+use std::any::TypeId;
+use std::collections::HashMap;
+use std::sync::LazyLock;
+
 use deno_core::StructuredCloneHostObjectRegistry;
-use deno_core::is_structured_clone_host_object;
 use deno_core::op2;
 use deno_core::read_structured_clone_host_object;
 use deno_core::structured_deserialize;
@@ -57,24 +60,10 @@ enum StructuredCloneHostObjectTag {
 }
 
 impl StructuredCloneHostObjectTag {
-  const ALL: &[Self] = &[Self::ImageData];
-
   fn from_tag(tag: u8) -> Option<Self> {
     match tag {
       tag if tag == Self::ImageData as u8 => Some(Self::ImageData),
       _ => None,
-    }
-  }
-
-  fn is_host_object<'s, 'i>(
-    self,
-    scope: &mut v8::PinScope<'s, 'i>,
-    object: v8::Local<'s, v8::Object>,
-  ) -> bool {
-    match self {
-      Self::ImageData => {
-        is_structured_clone_host_object::<ImageData>(scope, object)
-      }
     }
   }
 
@@ -107,6 +96,26 @@ impl StructuredCloneHostObjectTag {
   }
 }
 
+// Runtime type dispatch and wire tags have separate responsibilities. Rust
+// TypeIds are process-local and only select a codec; the enum value written by
+// that codec is the stable identifier persisted in the wire format.
+static HOST_OBJECT_TAG_BY_TYPE_ID: LazyLock<
+  HashMap<TypeId, StructuredCloneHostObjectTag>,
+> = LazyLock::new(|| {
+  HashMap::from([(
+    TypeId::of::<ImageData>(),
+    StructuredCloneHostObjectTag::ImageData,
+  )])
+});
+
+fn host_object_tag(
+  scope: &mut v8::Isolate,
+  object: v8::Local<v8::Object>,
+) -> Option<StructuredCloneHostObjectTag> {
+  let type_id = deno_core::cppgc::try_get_cppgc_type_id(scope, object.into())?;
+  HOST_OBJECT_TAG_BY_TYPE_ID.get(&type_id).copied()
+}
+
 struct WebStructuredCloneHostObjectRegistry;
 
 static HOST_OBJECT_REGISTRY: WebStructuredCloneHostObjectRegistry =
@@ -124,10 +133,7 @@ impl StructuredCloneHostObjectRegistry
     scope: &mut v8::PinScope<'s, 'i>,
     object: v8::Local<'s, v8::Object>,
   ) -> bool {
-    StructuredCloneHostObjectTag::ALL
-      .iter()
-      .copied()
-      .any(|host_object| host_object.is_host_object(scope, object))
+    host_object_tag(scope, object).is_some()
   }
 
   fn write_host_object<'s, 'i>(
@@ -136,10 +142,7 @@ impl StructuredCloneHostObjectRegistry
     object: v8::Local<'s, v8::Object>,
     serializer: &dyn v8::ValueSerializerHelper,
   ) -> Option<bool> {
-    let host_object = StructuredCloneHostObjectTag::ALL
-      .iter()
-      .copied()
-      .find(|host_object| host_object.is_host_object(scope, object))?;
+    let host_object = host_object_tag(scope, object)?;
     serializer.write_raw_bytes(&[host_object as u8]);
     host_object.write_payload(scope, object, serializer)
   }

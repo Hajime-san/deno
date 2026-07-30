@@ -16,10 +16,28 @@ use crate::runtime::SnapshotStoreDataStore;
 
 const CPPGC_SINGLE_TAG: u16 = 1;
 
-#[repr(C)]
+// rusty_v8 supports CppGC values with alignment up to 16. Fixing the wrapper
+// to that alignment also lets `CppGcObjectHeader` inspect every instantiation
+// through V8's typed unwrap API without changing the value offset.
+#[repr(C, align(16))]
 struct CppGcObject<T: GarbageCollected> {
   tag: TypeId,
   member: T,
+}
+
+// `CppGcObject<T>` is `repr(C)` and always starts with this header. This lets
+// runtime dispatch inspect the concrete Rust type before it knows `T`.
+#[repr(C, align(16))]
+struct CppGcObjectHeader {
+  tag: TypeId,
+}
+
+unsafe impl GarbageCollected for CppGcObjectHeader {
+  fn trace(&self, _visitor: &mut v8::cppgc::Visitor) {}
+
+  fn get_name(&self) -> &'static std::ffi::CStr {
+    c"CppGcObjectHeader"
+  }
 }
 
 unsafe impl<T: GarbageCollected> v8::cppgc::GarbageCollected
@@ -179,6 +197,27 @@ pub fn try_unwrap_cppgc_object<'sc, T: GarbageCollected + 'static>(
   val: v8::Local<'sc, v8::Value>,
 ) -> Option<UnsafePtr<T>> {
   try_unwrap_cppgc_with::<T>(isolate, val, &[])
+}
+
+/// Returns the concrete Rust type stored in a CppGC API wrapper.
+///
+/// The returned `TypeId` is process-local runtime metadata. It must not be
+/// persisted or used as a structured-clone wire tag.
+pub fn try_get_cppgc_type_id<'sc>(
+  isolate: &mut v8::Isolate,
+  val: v8::Local<'sc, v8::Value>,
+) -> Option<TypeId> {
+  let object = val.try_cast::<v8::Object>().ok()?;
+  if !object.is_api_wrapper() {
+    return None;
+  }
+
+  // SAFETY: Every object wrapped by this module contains a repr(C)
+  // `CppGcObject<T>`, whose first field has the `CppGcObjectHeader` layout.
+  let object = unsafe {
+    v8::Object::unwrap::<CPPGC_SINGLE_TAG, CppGcObjectHeader>(isolate, object)
+  }?;
+  Some(unsafe { object.as_ref() }.tag)
 }
 
 #[doc(hidden)]
