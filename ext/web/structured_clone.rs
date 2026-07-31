@@ -392,6 +392,9 @@ impl StructuredCloneHostObjectRegistry
   ) -> Option<v8::Local<'s, v8::Object>> {
     let tag = *deserializer.read_raw_bytes(1)?.first()?;
     let tag = StructuredCloneHostObjectTag::from_tag(tag)?;
+    // TODO:
+    // needs cheking wheather the interface exposed to the transfer target realm?
+    // https://source.chromium.org/chromium/chromium/src/+/main:third_party/blink/renderer/bindings/core/v8/serialization/v8_script_value_deserializer.cc;l=1043?q=envelope%20v8&ss=chromium%2Fchromium%2Fsrc
     if let Some(expected_interface_name) =
       self.transferable_by_tag.get(&tag).copied()
     {
