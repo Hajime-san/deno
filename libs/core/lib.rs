@@ -211,11 +211,20 @@ pub use crate::tasks::V8TaskSpawner;
 pub use crate::web_serialize_deserialize::SerializedValue;
 pub use crate::web_serialize_deserialize::StructuredCloneHostObject;
 pub use crate::web_serialize_deserialize::StructuredCloneHostObjectRegistry;
+pub use crate::web_serialize_deserialize::StructuredCloneTransferData;
+pub use crate::web_serialize_deserialize::StructuredCloneTransferable;
+pub use crate::web_serialize_deserialize::StructuredDeserializeWithTransferResult;
+pub use crate::web_serialize_deserialize::StructuredSerializeWithTransferResult;
 pub use crate::web_serialize_deserialize::WebIdlSerializable;
 pub use crate::web_serialize_deserialize::is_structured_clone_host_object;
 pub use crate::web_serialize_deserialize::read_structured_clone_host_object;
+pub use crate::web_serialize_deserialize::receive_structured_clone_host_object;
 pub use crate::web_serialize_deserialize::structured_deserialize;
+pub use crate::web_serialize_deserialize::structured_deserialize_with_transfer;
 pub use crate::web_serialize_deserialize::structured_serialize_internal;
+pub use crate::web_serialize_deserialize::structured_serialize_with_transfer;
+pub use crate::web_serialize_deserialize::transfer_structured_clone_host_object;
+pub use crate::web_serialize_deserialize::validate_structured_clone_transferable;
 pub use crate::web_serialize_deserialize::write_structured_clone_host_object;
 
 // Ensure we can use op2 in deno_core without any hackery.

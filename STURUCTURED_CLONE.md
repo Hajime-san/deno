@@ -81,7 +81,9 @@ Blinkの実際の処理は次の構造です。
 
 つまりBlinkもwrite側は最悪O(n)で、descriptorからcodecへの直接jumpではありません。
 
-Denoで直接jumpを実装するには、全CppGC object生成時にglobal registryを検索してcodec pointerをwrapperへ埋め込む必要があります。これは以下の問題があります。
+Denoで直接jumpを実装するには、全CppGC object生成時にglobal
+registryを検索してcodec
+pointerをwrapperへ埋め込む必要があります。これは以下の問題があります。
 
 - 全CppGC生成にHashMap lookupが追加される
 - coreのwrapperが`ext/web`のstructured clone事情を持つ
@@ -89,4 +91,5 @@ Denoで直接jumpを実装するには、全CppGC object生成時にglobal regis
 - wrapper layoutとstructured clone実装が密結合になる
 - `#[webidl(serializable)]`だけではgenericなCppGC生成処理を特殊化できない
 
-そのためdescriptor実装は残していません。現在の「CppGC `TypeId`取得 + registry HashMap」の方が責務分離を維持でき、期待O(1)なので、Blinkの線形dispatchよりも型数増加に強い構造です。
+そのためdescriptor実装は残していません。現在の「CppGC `TypeId`取得 + registry
+HashMap」の方が責務分離を維持でき、期待O(1)なので、Blinkの線形dispatchよりも型数増加に強い構造です。

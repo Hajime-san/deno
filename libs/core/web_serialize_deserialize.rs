@@ -31,6 +31,21 @@ pub enum SerializedValue<'s> {
   V8(Vec<u8>),
 }
 
+pub enum StructuredCloneTransferData<T> {
+  ArrayBuffer(v8::SharedRef<v8::BackingStore>),
+  HostObject(T),
+}
+
+pub struct StructuredSerializeWithTransferResult<'s, T> {
+  pub serialized: SerializedValue<'s>,
+  pub transfer_data_holders: Vec<StructuredCloneTransferData<T>>,
+}
+
+pub struct StructuredDeserializeWithTransferResult<'s> {
+  pub deserialized: v8::Local<'s, v8::Value>,
+  pub transferred_values: Vec<v8::Local<'s, v8::Value>>,
+}
+
 // Deno wraps V8's serialized data in an embedder-controlled version envelope:
 //
 //   "DENO" | embedder version:uint32(varint) | V8 header | V8 payload
@@ -78,6 +93,27 @@ pub trait StructuredCloneHostObject:
   ) -> Option<Self>;
 }
 
+/// Transfer and transfer-receiving steps for a Web IDL `[Transferable]`
+/// platform object. Transfer data is out-of-band and is never persisted in the
+/// structured-clone wire payload.
+pub trait StructuredCloneTransferable:
+  GarbageCollected + Sized + 'static
+{
+  type TransferData: 'static;
+
+  fn validate_transfer(&self) -> Result<(), JsErrorBox>;
+
+  fn transfer<'s, 'i>(
+    &self,
+    scope: &mut v8::PinScope<'s, 'i>,
+  ) -> Result<Self::TransferData, JsErrorBox>;
+
+  fn receive<'s, 'i>(
+    scope: &mut v8::PinScope<'s, 'i>,
+    data: Self::TransferData,
+  ) -> Result<Self, JsErrorBox>;
+}
+
 pub fn is_structured_clone_host_object<'s, 'i, T: StructuredCloneHostObject>(
   scope: &mut v8::PinScope<'s, 'i>,
   object: v8::Local<'s, v8::Object>,
@@ -114,11 +150,53 @@ pub fn read_structured_clone_host_object<
   Some(crate::cppgc::make_cppgc_object(scope, value))
 }
 
+pub fn validate_structured_clone_transferable<
+  's,
+  'i,
+  T: StructuredCloneTransferable,
+>(
+  scope: &mut v8::PinScope<'s, 'i>,
+  object: v8::Local<'s, v8::Object>,
+) -> Result<(), JsErrorBox> {
+  let value = crate::cppgc::try_unwrap_cppgc_object::<T>(scope, object.into())
+    .ok_or_else(|| data_clone_error("Transferable has an invalid brand"))?;
+  value.validate_transfer()
+}
+
+pub fn transfer_structured_clone_host_object<
+  's,
+  'i,
+  T: StructuredCloneTransferable,
+>(
+  scope: &mut v8::PinScope<'s, 'i>,
+  object: v8::Local<'s, v8::Object>,
+) -> Result<T::TransferData, JsErrorBox> {
+  let value = crate::cppgc::try_unwrap_cppgc_object::<T>(scope, object.into())
+    .ok_or_else(|| data_clone_error("Transferable has an invalid brand"))?;
+  // SAFETY: `object` remains live for this V8 serializer callback.
+  let value = unsafe { value.as_ref() };
+  value.transfer(scope)
+}
+
+pub fn receive_structured_clone_host_object<
+  's,
+  'i,
+  T: StructuredCloneTransferable,
+>(
+  scope: &mut v8::PinScope<'s, 'i>,
+  data: T::TransferData,
+) -> Result<v8::Local<'s, v8::Object>, JsErrorBox> {
+  let value = T::receive(scope, data)?;
+  Ok(crate::cppgc::make_cppgc_object(scope, value))
+}
+
 /// Hooks for platform objects whose serialization is defined by the embedder.
 ///
 /// The hooks are called by V8 while it walks a single object graph, so they
 /// must write and read exactly one host-object record per invocation.
 pub trait StructuredCloneHostObjectRegistry {
+  type TransferData;
+
   /// Version of the embedder-controlled wire format wrapped around V8 data.
   fn wire_format_version(&self) -> u32;
 
@@ -132,6 +210,7 @@ pub trait StructuredCloneHostObjectRegistry {
     &self,
     scope: &mut v8::PinScope<'s, 'i>,
     object: v8::Local<'s, v8::Object>,
+    transfer_id: Option<u32>,
     serializer: &dyn v8::ValueSerializerHelper,
   ) -> Option<bool>;
 
@@ -140,7 +219,26 @@ pub trait StructuredCloneHostObjectRegistry {
     scope: &mut v8::PinScope<'s, 'i>,
     deserializer: &dyn v8::ValueDeserializerHelper,
     wire_format_version: u32,
+    transferred_host_objects: &[v8::Global<v8::Object>],
   ) -> Option<v8::Local<'s, v8::Object>>;
+
+  fn validate_transferable_host_object<'s, 'i>(
+    &self,
+    scope: &mut v8::PinScope<'s, 'i>,
+    object: v8::Local<'s, v8::Object>,
+  ) -> Result<bool, JsErrorBox>;
+
+  fn transfer_host_object<'s, 'i>(
+    &self,
+    scope: &mut v8::PinScope<'s, 'i>,
+    object: v8::Local<'s, v8::Object>,
+  ) -> Result<Self::TransferData, JsErrorBox>;
+
+  fn receive_host_object<'s, 'i>(
+    &self,
+    scope: &mut v8::PinScope<'s, 'i>,
+    data: Self::TransferData,
+  ) -> Result<v8::Local<'s, v8::Object>, JsErrorBox>;
 }
 
 // V8 owns reference tracking while it serializes a complete object graph.
@@ -148,6 +246,7 @@ pub trait StructuredCloneHostObjectRegistry {
 struct V8SerializerDelegate<'a, R> {
   _for_storage: bool,
   host_objects: &'a R,
+  transferred_host_objects: Vec<v8::Global<v8::Object>>,
 }
 
 impl<R> v8::ValueSerializerImpl for V8SerializerDelegate<'_, R>
@@ -181,15 +280,21 @@ where
     object: v8::Local<'s, v8::Object>,
     serializer: &dyn v8::ValueSerializerHelper,
   ) -> Option<bool> {
+    let transfer_id = self
+      .transferred_host_objects
+      .iter()
+      .position(|transferred| v8::Local::new(scope, transferred) == object)
+      .map(|index| index as u32);
     self
       .host_objects
-      .write_host_object(scope, object, serializer)
+      .write_host_object(scope, object, transfer_id, serializer)
   }
 }
 
 struct V8DeserializerDelegate<'a, R> {
   host_objects: &'a R,
   wire_format_version: u32,
+  transferred_host_objects: Vec<v8::Global<v8::Object>>,
 }
 
 impl<R> v8::ValueDeserializerImpl for V8DeserializerDelegate<'_, R>
@@ -205,6 +310,7 @@ where
       scope,
       deserializer,
       self.wire_format_version,
+      &self.transferred_host_objects,
     )
   }
 }
@@ -216,6 +322,29 @@ pub fn structured_serialize_internal<'s, 'i, R>(
   value: v8::Local<'s, v8::Value>,
   for_storage: bool,
   host_objects: &R,
+) -> Result<SerializedValue<'s>, JsErrorBox>
+where
+  R: StructuredCloneHostObjectRegistry,
+{
+  structured_serialize_internal_with_transfers(
+    scope,
+    context,
+    value,
+    for_storage,
+    host_objects,
+    &[],
+    &[],
+  )
+}
+
+fn structured_serialize_internal_with_transfers<'s, 'i, R>(
+  scope: &mut v8::PinScope<'s, 'i>,
+  context: v8::Local<'s, v8::Context>,
+  value: v8::Local<'s, v8::Value>,
+  for_storage: bool,
+  host_objects: &R,
+  transferred_array_buffers: &[(u32, v8::Local<'s, v8::ArrayBuffer>)],
+  transferred_host_objects: &[v8::Local<'s, v8::Object>],
 ) -> Result<SerializedValue<'s>, JsErrorBox>
 where
   R: StructuredCloneHostObjectRegistry,
@@ -239,7 +368,127 @@ where
   // 6.~
   // V8 owns the recursive object graph traversal, including reference tracking
   // for aliases and cycles. Do not invoke this backend recursively per type.
-  serialize_v8_graph(scope, context, value, for_storage, host_objects)
+  serialize_v8_graph(
+    scope,
+    context,
+    value,
+    for_storage,
+    host_objects,
+    transferred_array_buffers,
+    transferred_host_objects,
+  )
+}
+
+enum PreparedTransfer<'s> {
+  ArrayBuffer(v8::Local<'s, v8::ArrayBuffer>),
+  HostObject(v8::Local<'s, v8::Object>),
+}
+
+fn data_clone_error(message: impl Into<String>) -> JsErrorBox {
+  JsErrorBox::new("DOMExceptionDataCloneError", message.into())
+}
+
+// https://html.spec.whatwg.org/multipage/structured-data.html#structuredserializewithtransfer
+pub fn structured_serialize_with_transfer<'s, 'i, R>(
+  scope: &mut v8::PinScope<'s, 'i>,
+  context: v8::Local<'s, v8::Context>,
+  value: v8::Local<'s, v8::Value>,
+  transfer_list: &[v8::Local<'s, v8::Value>],
+  host_objects: &R,
+) -> Result<
+  StructuredSerializeWithTransferResult<'s, R::TransferData>,
+  JsErrorBox,
+>
+where
+  R: StructuredCloneHostObjectRegistry,
+{
+  let mut prepared = Vec::with_capacity(transfer_list.len());
+  let mut transferred_array_buffers = Vec::new();
+  let mut transferred_host_objects = Vec::new();
+
+  for (index, transferable) in transfer_list.iter().copied().enumerate() {
+    if transfer_list[..index].contains(&transferable) {
+      return Err(data_clone_error("Transfer list contains duplicate object"));
+    }
+
+    if let Ok(array_buffer) = transferable.try_cast::<v8::ArrayBuffer>() {
+      if array_buffer.was_detached() {
+        return Err(data_clone_error(
+          "Transfer list contains a detached ArrayBuffer",
+        ));
+      }
+      let transfer_id = transferred_array_buffers.len() as u32;
+      transferred_array_buffers.push((transfer_id, array_buffer));
+      prepared.push(PreparedTransfer::ArrayBuffer(array_buffer));
+      continue;
+    }
+
+    let Ok(object) = transferable.try_cast::<v8::Object>() else {
+      return Err(data_clone_error(
+        "Value in transfer list is not transferable",
+      ));
+    };
+    if !host_objects.validate_transferable_host_object(scope, object)? {
+      return Err(data_clone_error(
+        "Value in transfer list is not transferable",
+      ));
+    }
+    transferred_host_objects.push(object);
+    prepared.push(PreparedTransfer::HostObject(object));
+  }
+
+  let serialized = structured_serialize_internal_with_transfers(
+    scope,
+    context,
+    value,
+    false,
+    host_objects,
+    &transferred_array_buffers,
+    &transferred_host_objects,
+  )?;
+
+  // A pending V8 exception is represented by the existing empty-buffer
+  // sentinel. In particular, do not detach anything on that path.
+  if matches!(&serialized, SerializedValue::V8(bytes) if bytes.is_empty()) {
+    return Ok(StructuredSerializeWithTransferResult {
+      serialized,
+      transfer_data_holders: Vec::new(),
+    });
+  }
+
+  let mut transfer_data_holders = Vec::with_capacity(prepared.len());
+  for transferable in prepared {
+    match transferable {
+      PreparedTransfer::ArrayBuffer(array_buffer) => {
+        if array_buffer.was_detached() || !array_buffer.is_detachable() {
+          return Err(data_clone_error(
+            "ArrayBuffer became detached or non-transferable while serializing",
+          ));
+        }
+        let backing_store = array_buffer.get_backing_store();
+        if array_buffer.detach(None) != Some(true) {
+          return Err(data_clone_error("ArrayBuffer could not be detached"));
+        }
+        transfer_data_holders
+          .push(StructuredCloneTransferData::ArrayBuffer(backing_store));
+      }
+      PreparedTransfer::HostObject(object) => {
+        if !host_objects.validate_transferable_host_object(scope, object)? {
+          return Err(data_clone_error(
+            "Host object became detached while serializing",
+          ));
+        }
+        let data = host_objects.transfer_host_object(scope, object)?;
+        transfer_data_holders
+          .push(StructuredCloneTransferData::HostObject(data));
+      }
+    }
+  }
+
+  Ok(StructuredSerializeWithTransferResult {
+    serialized,
+    transfer_data_holders,
+  })
 }
 
 fn serialize_v8_graph<'s, 'i, R>(
@@ -248,6 +497,8 @@ fn serialize_v8_graph<'s, 'i, R>(
   value: v8::Local<'s, v8::Value>,
   for_storage: bool,
   host_objects: &R,
+  transferred_array_buffers: &[(u32, v8::Local<'s, v8::ArrayBuffer>)],
+  transferred_host_objects: &[v8::Local<'s, v8::Object>],
 ) -> Result<SerializedValue<'s>, JsErrorBox>
 where
   R: StructuredCloneHostObjectRegistry,
@@ -257,11 +508,18 @@ where
     Box::new(V8SerializerDelegate {
       _for_storage: for_storage,
       host_objects,
+      transferred_host_objects: transferred_host_objects
+        .iter()
+        .map(|object| v8::Global::new(scope, *object))
+        .collect(),
     }),
   );
   serializer.write_raw_bytes(EMBEDDER_MAGIC);
   serializer.write_uint32(host_objects.wire_format_version());
   serializer.write_header();
+  for (transfer_id, array_buffer) in transferred_array_buffers {
+    serializer.transfer_array_buffer(*transfer_id, *array_buffer);
+  }
 
   v8::tc_scope!(let tc_scope, scope);
   let written = serializer.write_value(context, value);
@@ -293,9 +551,59 @@ where
     SerializedValue::Primitive(value) => Ok(value),
     // 6.~
     SerializedValue::V8(bytes) => {
-      deserialize_v8_graph(scope, target_realm, &bytes, host_objects)
+      deserialize_v8_graph(scope, target_realm, &bytes, host_objects, &[], &[])
     }
   }
+}
+
+// https://html.spec.whatwg.org/multipage/structured-data.html#structureddeserializewithtransfer
+pub fn structured_deserialize_with_transfer<'s, 'i, R>(
+  scope: &mut v8::PinScope<'s, 'i>,
+  result: StructuredSerializeWithTransferResult<'s, R::TransferData>,
+  target_realm: v8::Local<'s, v8::Context>,
+  host_objects: &R,
+) -> Result<StructuredDeserializeWithTransferResult<'s>, JsErrorBox>
+where
+  R: StructuredCloneHostObjectRegistry,
+{
+  let mut transferred_values =
+    Vec::with_capacity(result.transfer_data_holders.len());
+  let mut transferred_array_buffers = Vec::new();
+  let mut transferred_host_objects = Vec::new();
+
+  for holder in result.transfer_data_holders {
+    match holder {
+      StructuredCloneTransferData::ArrayBuffer(backing_store) => {
+        let array_buffer =
+          v8::ArrayBuffer::with_backing_store(scope, &backing_store);
+        let transfer_id = transferred_array_buffers.len() as u32;
+        transferred_array_buffers.push((transfer_id, array_buffer));
+        transferred_values.push(array_buffer.into());
+      }
+      StructuredCloneTransferData::HostObject(data) => {
+        let object = host_objects.receive_host_object(scope, data)?;
+        transferred_host_objects.push(object);
+        transferred_values.push(object.into());
+      }
+    }
+  }
+
+  let deserialized = match result.serialized {
+    SerializedValue::Primitive(value) => value,
+    SerializedValue::V8(bytes) => deserialize_v8_graph(
+      scope,
+      target_realm,
+      &bytes,
+      host_objects,
+      &transferred_array_buffers,
+      &transferred_host_objects,
+    )?,
+  };
+
+  Ok(StructuredDeserializeWithTransferResult {
+    deserialized,
+    transferred_values,
+  })
 }
 
 fn deserialize_v8_graph<'s, 'i, R>(
@@ -303,6 +611,8 @@ fn deserialize_v8_graph<'s, 'i, R>(
   target_realm: v8::Local<'s, v8::Context>,
   bytes: &[u8],
   host_objects: &R,
+  transferred_array_buffers: &[(u32, v8::Local<'s, v8::ArrayBuffer>)],
+  transferred_host_objects: &[v8::Local<'s, v8::Object>],
 ) -> Result<v8::Local<'s, v8::Value>, JsErrorBox>
 where
   R: StructuredCloneHostObjectRegistry,
@@ -320,11 +630,18 @@ where
     Box::new(V8DeserializerDelegate {
       host_objects,
       wire_format_version,
+      transferred_host_objects: transferred_host_objects
+        .iter()
+        .map(|object| v8::Global::new(scope, *object))
+        .collect(),
     }),
     bytes,
   );
   if !deserializer.read_header(target_realm).unwrap_or_default() {
     return Err(JsErrorBox::range_error("Cannot deserialize value header"));
+  }
+  for (transfer_id, array_buffer) in transferred_array_buffers {
+    deserializer.transfer_array_buffer(*transfer_id, *array_buffer);
   }
   deserializer
     .read_value(target_realm)

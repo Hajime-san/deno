@@ -36,6 +36,10 @@ use encoding_rs::DecoderResult;
 use encoding_rs::Encoding;
 pub use message_port::MessagePortError;
 pub use stream_resource::StreamResourceError;
+#[doc(hidden)]
+pub use structured_clone::StructuredCloneHostObjectTag;
+#[doc(hidden)]
+pub use structured_clone::WebStructuredCloneHostObjectRegistry;
 
 pub use crate::blob::Blob;
 pub use crate::blob::BlobPart;
@@ -208,6 +212,7 @@ deno_core::extension!(deno_web,
     state.put(geometry::State::new(options.enable_css_parser_features));
     state.put(options.bc);
     state.put(broadcast_channel::BroadcastSabStash::default());
+    state.put(structured_clone::WebStructuredCloneHostObjectRegistry::default());
   }
 );
 
