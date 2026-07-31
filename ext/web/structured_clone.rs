@@ -784,48 +784,74 @@ mod tests {
     deno_core::scope!(scope, runtime);
     let context = scope.get_current_context();
     let registry = WebStructuredCloneHostObjectRegistry::default();
-    let source = deno_core::cppgc::make_cppgc_object(
+    let first_source = deno_core::cppgc::make_cppgc_object(
       scope,
       TestTransferable {
         value: 42,
         detached: std::cell::Cell::new(false),
       },
     );
+    let second_source = deno_core::cppgc::make_cppgc_object(
+      scope,
+      TestTransferable {
+        value: 43,
+        detached: std::cell::Cell::new(false),
+      },
+    );
     let graph = v8::Object::new(scope);
-    let key = v8::String::new(scope, "value").unwrap();
-    assert_eq!(graph.set(scope, key.into(), source.into()), Some(true));
+    let first_key = v8::String::new(scope, "first").unwrap();
+    let alias_key = v8::String::new(scope, "alias").unwrap();
+    let second_key = v8::String::new(scope, "second").unwrap();
+    assert_eq!(
+      graph.set(scope, first_key.into(), first_source.into()),
+      Some(true)
+    );
+    assert_eq!(
+      graph.set(scope, alias_key.into(), first_source.into()),
+      Some(true)
+    );
+    assert_eq!(
+      graph.set(scope, second_key.into(), second_source.into()),
+      Some(true)
+    );
 
     let result = deno_core::structured_serialize_with_transfer(
       scope,
       context,
       graph.into(),
-      &[source.into()],
+      &[first_source.into(), second_source.into()],
       &registry,
     )
     .unwrap();
-    let source_value = deno_core::cppgc::try_unwrap_cppgc_object::<
-      TestTransferable,
-    >(scope, source.into())
-    .unwrap();
-    assert!(source_value.detached.get());
+    for source in [first_source, second_source] {
+      let source_value = deno_core::cppgc::try_unwrap_cppgc_object::<
+        TestTransferable,
+      >(scope, source.into())
+      .unwrap();
+      assert!(source_value.detached.get());
+    }
 
     let result = deno_core::structured_deserialize_with_transfer(
       scope, result, context, &registry,
     )
     .unwrap();
-    assert_eq!(result.transferred_values.len(), 1);
+    assert_eq!(result.transferred_values.len(), 2);
     let cloned_graph = result.deserialized.try_cast::<v8::Object>().unwrap();
-    let cloned = cloned_graph
-      .get(scope, key.into())
-      .unwrap()
-      .try_cast::<v8::Object>()
+    for (key, transfer_id, expected) in
+      [(first_key, 0, 42), (alias_key, 0, 42), (second_key, 1, 43)]
+    {
+      let cloned = cloned_graph
+        .get(scope, key.into())
+        .unwrap()
+        .try_cast::<v8::Object>()
+        .unwrap();
+      assert_eq!(cloned, result.transferred_values[transfer_id]);
+      let cloned_value = deno_core::cppgc::try_unwrap_cppgc_object::<
+        TestTransferable,
+      >(scope, cloned.into())
       .unwrap();
-    assert_eq!(cloned, result.transferred_values[0]);
-    let cloned_value = deno_core::cppgc::try_unwrap_cppgc_object::<
-      TestTransferable,
-    >(scope, cloned.into())
-    .unwrap();
-    assert_eq!(cloned_value.value, 42);
-    assert!(!cloned_value.detached.get());
+      assert_eq!(cloned_value.value, expected);
+      assert!(!cloned_value.detached.get());
+    }
   }
 }

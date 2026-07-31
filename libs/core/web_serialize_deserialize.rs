@@ -259,7 +259,10 @@ pub trait StructuredCloneHostObjectRegistry {
 struct V8SerializerDelegate<'a, R> {
   _for_storage: bool,
   host_objects: &'a R,
-  transferred_host_objects: Vec<v8::Global<v8::Object>>,
+  // V8 Map provides identity-based lookup that remains valid if V8 moves an
+  // object. Do not key a Rust HashMap by Object::get_identity_hash alone: V8
+  // explicitly does not guarantee that those hashes are unique.
+  transferred_host_object_ids: v8::Global<v8::Map>,
 }
 
 impl<R> v8::ValueSerializerImpl for V8SerializerDelegate<'_, R>
@@ -293,11 +296,12 @@ where
     object: v8::Local<'s, v8::Object>,
     serializer: &dyn v8::ValueSerializerHelper,
   ) -> Option<bool> {
-    let transfer_id = self
-      .transferred_host_objects
-      .iter()
-      .position(|transferred| v8::Local::new(scope, transferred) == object)
-      .map(|index| index as u32);
+    let transferred_host_object_ids =
+      v8::Local::new(scope, &self.transferred_host_object_ids);
+    let transfer_id = transferred_host_object_ids
+      .get(scope, object.into())
+      .and_then(|value| value.try_cast::<v8::Uint32>().ok())
+      .map(|value| value.value());
     self
       .host_objects
       .write_host_object(scope, object, transfer_id, serializer)
@@ -418,10 +422,14 @@ where
   let mut prepared = Vec::with_capacity(transfer_list.len());
   let mut transferred_array_buffers = Vec::new();
   let mut transferred_host_objects = Vec::new();
+  let seen = v8::Set::new(scope);
 
-  for (index, transferable) in transfer_list.iter().copied().enumerate() {
-    if transfer_list[..index].contains(&transferable) {
+  for transferable in transfer_list.iter().copied() {
+    if seen.has(scope, transferable).unwrap_or(false) {
       return Err(data_clone_error("Transfer list contains duplicate object"));
+    }
+    if seen.add(scope, transferable).is_none() {
+      return Err(data_clone_error("Cannot index transfer list"));
     }
 
     if let Ok(array_buffer) = transferable.try_cast::<v8::ArrayBuffer>() {
@@ -516,15 +524,27 @@ fn serialize_v8_graph<'s, 'i, R>(
 where
   R: StructuredCloneHostObjectRegistry,
 {
+  let transferred_host_object_ids = v8::Map::new(scope);
+  for (transfer_id, object) in transferred_host_objects.iter().enumerate() {
+    let transfer_id = u32::try_from(transfer_id)
+      .map_err(|_| data_clone_error("Too many host objects to transfer"))?;
+    let transfer_id = v8::Integer::new_from_unsigned(scope, transfer_id);
+    if transferred_host_object_ids
+      .set(scope, (*object).into(), transfer_id.into())
+      .is_none()
+    {
+      return Err(data_clone_error("Cannot index host object transfer"));
+    }
+  }
   let serializer = v8::ValueSerializer::new(
     scope,
     Box::new(V8SerializerDelegate {
       _for_storage: for_storage,
       host_objects,
-      transferred_host_objects: transferred_host_objects
-        .iter()
-        .map(|object| v8::Global::new(scope, *object))
-        .collect(),
+      transferred_host_object_ids: v8::Global::new(
+        scope,
+        transferred_host_object_ids,
+      ),
     }),
   );
   serializer.write_raw_bytes(EMBEDDER_MAGIC);
