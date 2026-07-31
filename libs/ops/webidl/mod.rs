@@ -3,6 +3,8 @@
 mod dictionary;
 mod r#enum;
 
+use std::ffi::CString;
+
 use proc_macro2::TokenStream;
 use quote::ToTokens;
 use quote::quote;
@@ -11,6 +13,7 @@ use syn::Data;
 use syn::DeriveInput;
 use syn::Error;
 use syn::ItemStruct;
+use syn::LitCStr;
 use syn::Token;
 use syn::parse::Parse;
 use syn::parse::ParseStream;
@@ -69,11 +72,21 @@ pub fn webidl_attribute(
   parse2::<SerializableAttribute>(attr)?;
   let item = parse2::<ItemStruct>(item)?;
   let ident = &item.ident;
+  let interface_name = LitCStr::new(
+    &CString::new(ident.to_string()).expect("Rust identifiers contain no NUL"),
+    ident.span(),
+  );
   let (impl_generics, type_generics, where_clause) =
     item.generics.split_for_impl();
 
   Ok(quote! {
     #item
+
+    impl #impl_generics ::deno_core::WebIdlInterface
+      for #ident #type_generics #where_clause
+    {
+      const INTERFACE_NAME: &'static ::std::ffi::CStr = #interface_name;
+    }
 
     impl #impl_generics ::deno_core::WebIdlSerializable
       for #ident #type_generics #where_clause

@@ -215,6 +215,7 @@ pub use crate::web_serialize_deserialize::StructuredCloneTransferData;
 pub use crate::web_serialize_deserialize::StructuredCloneTransferable;
 pub use crate::web_serialize_deserialize::StructuredDeserializeWithTransferResult;
 pub use crate::web_serialize_deserialize::StructuredSerializeWithTransferResult;
+pub use crate::web_serialize_deserialize::WebIdlInterface;
 pub use crate::web_serialize_deserialize::WebIdlSerializable;
 pub use crate::web_serialize_deserialize::is_structured_clone_host_object;
 pub use crate::web_serialize_deserialize::read_structured_clone_host_object;

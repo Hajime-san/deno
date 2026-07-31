@@ -64,7 +64,7 @@ deserialize_options.message_ports = &message_ports;
 // return ScriptValue(isolate, // unpacked->Deserialize(isolate,
 deserialize_options));
 
-バイナリ区別のためのタグ実装 //
+バイナリ互換のためのタグ実装 //
 https://source.chromium.org/chromium/chromium/src/+/main:third_party/blink/renderer/bindings/core/v8/serialization/v8_script_value_serializer.cc
 //
 https://source.chromium.org/chromium/chromium/src/+/main:third_party/blink/renderer/bindings/core/v8/serialization/v8_script_value_deserializer.cc
@@ -93,3 +93,8 @@ pointerをwrapperへ埋め込む必要があります。これは以下の問題
 
 そのためdescriptor実装は残していません。現在の「CppGC `TypeId`取得 + registry
 HashMap」の方が責務分離を維持でき、期待O(1)なので、Blinkの線形dispatchよりも型数増加に強い構造です。
+
+// v8::valueからオブジェクトの変換および判定
+https://source.chromium.org/chromium/chromium/src/+/main:third_party/blink/renderer/bindings/core/v8/serialization/v8_script_value_serializer.cc;l=1004?q=writedouble&ss=chromium%2Fchromium%2Fsrc:third_party%2Fblink%2Frenderer%2Fbindings%2Fcore%2F
+https://source.chromium.org/chromium/chromium/src/+/main:third_party/blink/renderer/platform/bindings/wrapper_type_info.cc;drc=9d60d9c35cf5c6132bab75d9778e7e5e373747d6;l=48
+https://source.chromium.org/chromium/chromium/src/+/main:third_party/blink/renderer/platform/bindings/script_wrappable.h

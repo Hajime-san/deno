@@ -22,14 +22,39 @@ const CPPGC_SINGLE_TAG: u16 = 1;
 #[repr(C, align(16))]
 struct CppGcObject<T: GarbageCollected> {
   tag: TypeId,
+  name: &'static std::ffi::CStr,
   member: T,
 }
 
 // `CppGcObject<T>` is `repr(C)` and always starts with this header. This lets
-// runtime dispatch inspect the concrete Rust type before it knows `T`.
+// runtime dispatch inspect metadata before it knows `T`.
+//
+// The name-based dispatch is inspired by Blink's ScriptWrappable,
+// WrapperTypeInfo, and ToScriptWrappable. Blink associates an IDL interface
+// descriptor with every wrapper rather than deriving platform-object identity
+// from its C++ implementation type. Deno stores the explicitly supplied CppGC
+// name in the common header so Web IDL dispatch can likewise remain independent
+// of Rust TypeId. It is process-local metadata and must never be serialized.
+//
+// https://source.chromium.org/chromium/chromium/src/+/main:third_party/blink/renderer/platform/bindings/script_wrappable.h
+// https://source.chromium.org/chromium/chromium/src/+/main:third_party/blink/renderer/platform/bindings/wrapper_type_info.h
+//
+// NOTE:
+// `TypeId` remains here for typed unwrap and IDL inheritance checks. A future
+// design should consider replacing both fields with one thin pointer to a
+// static, IDL-generated type descriptor. That would remove runtime identity's
+// dependency on the concrete Rust implementation type, align more closely
+// with Blink's WrapperTypeInfo, and avoid the extra fat-pointer-sized field in
+// every CppGC allocation. The tradeoff is a project-wide migration: every
+// CppGC type would need a unique descriptor, typed unwrap would need to prove
+// descriptor compatibility, inheritance relationships would need to move out
+// of TypeId, and descriptor registration must work reliably across crates and
+// snapshots. Until that design is reviewed as a whole, keep TypeId as the
+// internal brand-safety mechanism. Neither field is a stable or persisted ID.
 #[repr(C, align(16))]
 struct CppGcObjectHeader {
   tag: TypeId,
+  name: &'static std::ffi::CStr,
 }
 
 unsafe impl GarbageCollected for CppGcObjectHeader {
@@ -102,11 +127,13 @@ pub fn wrap_object<'a, T: GarbageCollected + 'static>(
   t: T,
 ) -> v8::Local<'a, v8::Object> {
   let heap = isolate.get_cpp_heap().unwrap();
+  let name = t.get_name();
   unsafe {
     let member = v8::cppgc::make_garbage_collected(
       heap,
       CppGcObject {
         tag: TypeId::of::<T>(),
+        name,
         member: t,
       },
     );
@@ -218,6 +245,29 @@ pub fn try_get_cppgc_type_id<'sc>(
     v8::Object::unwrap::<CPPGC_SINGLE_TAG, CppGcObjectHeader>(isolate, object)
   }?;
   Some(unsafe { object.as_ref() }.tag)
+}
+
+/// Returns the explicit name stored in a CppGC API wrapper.
+///
+/// Web IDL bindings use this name as process-local interface identity for
+/// runtime dispatch. It is not a structured-clone wire tag and must not be
+/// persisted. Types participating in Web IDL dispatch must use their Web IDL
+/// interface name as their `GarbageCollected::get_name()` result.
+pub fn try_get_cppgc_name<'sc>(
+  isolate: &mut v8::Isolate,
+  val: v8::Local<'sc, v8::Value>,
+) -> Option<&'static std::ffi::CStr> {
+  let object = val.try_cast::<v8::Object>().ok()?;
+  if !object.is_api_wrapper() {
+    return None;
+  }
+
+  // SAFETY: Every object wrapped by this module contains a repr(C)
+  // `CppGcObject<T>`, whose first fields have the `CppGcObjectHeader` layout.
+  let object = unsafe {
+    v8::Object::unwrap::<CPPGC_SINGLE_TAG, CppGcObjectHeader>(isolate, object)
+  }?;
+  Some(unsafe { object.as_ref() }.name)
 }
 
 #[doc(hidden)]
