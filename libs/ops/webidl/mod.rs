@@ -69,7 +69,7 @@ pub fn webidl_attribute(
   attr: TokenStream,
   item: TokenStream,
 ) -> Result<TokenStream, Error> {
-  parse2::<SerializableAttribute>(attr)?;
+  let attributes = parse2::<InterfaceAttributes>(attr)?;
   let item = parse2::<ItemStruct>(item)?;
   let ident = &item.ident;
   let interface_name = LitCStr::new(
@@ -78,6 +78,22 @@ pub fn webidl_attribute(
   );
   let (impl_generics, type_generics, where_clause) =
     item.generics.split_for_impl();
+  let serializable = attributes.serializable.then(|| {
+    quote! {
+      impl #impl_generics ::deno_core::WebIdlSerializable
+        for #ident #type_generics #where_clause
+      {
+      }
+    }
+  });
+  let transferable = attributes.transferable.then(|| {
+    quote! {
+      impl #impl_generics ::deno_core::WebIdlTransferable
+        for #ident #type_generics #where_clause
+      {
+      }
+    }
+  });
 
   Ok(quote! {
     #item
@@ -88,25 +104,46 @@ pub fn webidl_attribute(
       const INTERFACE_NAME: &'static ::std::ffi::CStr = #interface_name;
     }
 
-    impl #impl_generics ::deno_core::WebIdlSerializable
-      for #ident #type_generics #where_clause
-    {
-    }
+    #serializable
+    #transferable
   })
 }
 
-struct SerializableAttribute;
+#[derive(Default)]
+struct InterfaceAttributes {
+  serializable: bool,
+  transferable: bool,
+}
 
-impl Parse for SerializableAttribute {
+impl Parse for InterfaceAttributes {
   fn parse(input: ParseStream) -> syn::Result<Self> {
-    let ident = input.parse::<syn::Ident>()?;
-    if ident != "serializable" {
-      return Err(Error::new(ident.span(), "expected `serializable`"));
+    let mut attributes = Self::default();
+    while !input.is_empty() {
+      let ident = input.parse::<syn::Ident>()?;
+      let present = match ident.to_string().as_str() {
+        "serializable" => &mut attributes.serializable,
+        "transferable" => &mut attributes.transferable,
+        _ => {
+          return Err(Error::new(
+            ident.span(),
+            "expected `serializable` or `transferable`",
+          ));
+        }
+      };
+      if *present {
+        return Err(Error::new(ident.span(), "duplicate Web IDL attribute"));
+      }
+      *present = true;
+
+      if input.is_empty() {
+        break;
+      }
+      input.parse::<Token![,]>()?;
     }
-    if !input.is_empty() {
-      return Err(input.error("unexpected tokens after `serializable`"));
+    if !attributes.serializable && !attributes.transferable {
+      return Err(input.error("expected a Web IDL attribute"));
     }
-    Ok(Self)
+    Ok(attributes)
   }
 }
 

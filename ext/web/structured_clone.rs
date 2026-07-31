@@ -327,6 +327,8 @@ mod test_transferable {
   impl deno_core::WebIdlInterface for TestTransferable {
     const INTERFACE_NAME: &'static std::ffi::CStr = c"TestTransferable";
   }
+
+  impl deno_core::WebIdlTransferable for TestTransferable {}
 }
 
 fn host_object_interface_name(
