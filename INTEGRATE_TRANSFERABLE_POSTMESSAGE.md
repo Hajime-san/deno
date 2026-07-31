@@ -82,12 +82,12 @@ struct StructuredSerializeWithTransferResult<T> {
 }
 ```
 
-The public `structuredClone` entry point returns cloneable primitives
-directly after converting its options, but only when the transfer list is empty.
-The intermediate serializer always produces bytes so its result can be persisted
-or moved to another isolate. A primitive value with a non-empty transfer list
-must still run WithTransfer so unreachable list entries are transferred and
-detached as required by the specification.
+The public `structuredClone` entry point returns cloneable primitives directly
+after converting its options, but only when the transfer list is empty. The
+intermediate serializer always produces bytes so its result can be persisted or
+moved to another isolate. A primitive value with a non-empty transfer list must
+still run WithTransfer so unreachable list entries are transferred and detached
+as required by the specification.
 
 This removes the need for a separate postMessage-only serialized value type. The
 same bytes can be passed to same-isolate deserialization, persisted by a storage
