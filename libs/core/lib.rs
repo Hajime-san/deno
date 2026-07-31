@@ -208,7 +208,6 @@ pub use crate::source_map::SourceMapData;
 pub use crate::source_map::SourceMapper;
 pub use crate::tasks::V8CrossThreadTaskSpawner;
 pub use crate::tasks::V8TaskSpawner;
-pub use crate::web_serialize_deserialize::SerializedValue;
 pub use crate::web_serialize_deserialize::StructuredCloneHostObject;
 pub use crate::web_serialize_deserialize::StructuredCloneHostObjectRegistry;
 pub use crate::web_serialize_deserialize::StructuredCloneTransferData;

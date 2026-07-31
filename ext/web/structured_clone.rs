@@ -513,6 +513,21 @@ pub fn structured_clone<'s, 'i>(
     .clone();
   let options = StructuredSerializeOptions::convert(scope, options)
     .map_err(JsErrorBox::from_err)?;
+
+  // Primitives have no identity to reconstruct. Keep this optimization at the
+  // API boundary: a non-empty transfer list must still be validated and
+  // processed even when the cloned value itself is a primitive.
+  if options.transfer.is_empty()
+    && (value.is_undefined()
+      || value.is_null()
+      || value.is_boolean()
+      || value.is_number()
+      || value.is_big_int()
+      || value.is_string())
+  {
+    return Ok(value);
+  }
+
   let serialized = structured_serialize_with_transfer(
     scope,
     context,
@@ -534,7 +549,6 @@ mod tests {
 
   use deno_core::JsRuntime;
   use deno_core::RuntimeOptions;
-  use deno_core::SerializedValue;
   use deno_core::is_structured_clone_host_object;
   use deno_core::v8;
 
@@ -585,6 +599,26 @@ mod tests {
   }
 
   #[test]
+  fn intermediate_serialization_encodes_primitives() {
+    let mut runtime = runtime();
+
+    deno_core::scope!(scope, runtime);
+    let context = scope.get_current_context();
+    let registry = WebStructuredCloneHostObjectRegistry::default();
+    let value: v8::Local<v8::Value> = v8::Integer::new(scope, 42).into();
+    let bytes = deno_core::structured_serialize_internal(
+      scope, context, value, false, &registry,
+    )
+    .unwrap();
+
+    assert!(bytes.starts_with(b"DENO"));
+    let value =
+      deno_core::structured_deserialize(scope, bytes, context, &registry)
+        .unwrap();
+    assert_eq!(value.int32_value(scope), Some(42));
+  }
+
+  #[test]
   fn image_data_v1_wire_format() {
     let mut runtime = runtime();
     let value = runtime
@@ -605,12 +639,10 @@ mod tests {
     let context = scope.get_current_context();
     let registry = WebStructuredCloneHostObjectRegistry::default();
     let value = deno_core::v8::Local::new(scope, value);
-    let SerializedValue::V8(bytes) = deno_core::structured_serialize_internal(
+    let bytes = deno_core::structured_serialize_internal(
       scope, context, value, false, &registry,
     )
-    .unwrap() else {
-      panic!("ImageData must use the V8 structured clone format");
-    };
+    .unwrap();
 
     assert_eq!(bytes, IMAGE_DATA_V1_V8_16);
   }
@@ -633,7 +665,7 @@ mod tests {
     let registry = WebStructuredCloneHostObjectRegistry::default();
     let value = deno_core::structured_deserialize(
       scope,
-      SerializedValue::V8(IMAGE_DATA_V1_V8_16.to_vec()),
+      IMAGE_DATA_V1_V8_16.to_vec(),
       context,
       &registry,
     )

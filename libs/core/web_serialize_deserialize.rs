@@ -26,18 +26,13 @@ use crate::cppgc::GarbageCollected;
 // StructuredSerializeWithTransfer. The V8 serializer receives the transfer
 // state prepared by that layer.
 
-pub enum SerializedValue<'s> {
-  Primitive(v8::Local<'s, v8::Value>),
-  V8(Vec<u8>),
-}
-
 pub enum StructuredCloneTransferData<T> {
   ArrayBuffer(v8::SharedRef<v8::BackingStore>),
   HostObject(T),
 }
 
-pub struct StructuredSerializeWithTransferResult<'s, T> {
-  pub serialized: SerializedValue<'s>,
+pub struct StructuredSerializeWithTransferResult<T> {
+  pub serialized: Vec<u8>,
   pub transfer_data_holders: Vec<StructuredCloneTransferData<T>>,
 }
 
@@ -347,7 +342,7 @@ pub fn structured_serialize_internal<'s, 'i, R>(
   value: v8::Local<'s, v8::Value>,
   for_storage: bool,
   host_objects: &R,
-) -> Result<SerializedValue<'s>, JsErrorBox>
+) -> Result<Vec<u8>, JsErrorBox>
 where
   R: StructuredCloneHostObjectRegistry,
 {
@@ -370,29 +365,18 @@ fn structured_serialize_internal_with_transfers<'s, 'i, R>(
   host_objects: &R,
   transferred_array_buffers: &[(u32, v8::Local<'s, v8::ArrayBuffer>)],
   transferred_host_objects: &[v8::Local<'s, v8::Object>],
-) -> Result<SerializedValue<'s>, JsErrorBox>
+) -> Result<Vec<u8>, JsErrorBox>
 where
   R: StructuredCloneHostObjectRegistry,
 {
-  // 4.
-  if value.is_undefined()
-    || value.is_null()
-    || value.is_boolean()
-    || value.is_number()
-    || value.is_big_int()
-    || value.is_string()
-  {
-    return Ok(SerializedValue::Primitive(value));
-  }
-
-  // 5.
   if value.is_symbol() {
     return Err(JsErrorBox::new("DataCloneError", "Cannot serialize Symbol"));
   }
 
-  // 6.~
   // V8 owns the recursive object graph traversal, including reference tracking
-  // for aliases and cycles. Do not invoke this backend recursively per type.
+  // for aliases and cycles. Always produce owned bytes at this intermediate
+  // layer so the result can be persisted or moved to another isolate. Callers
+  // such as structuredClone may optimize primitives before reaching here.
   serialize_v8_graph(
     scope,
     context,
@@ -420,10 +404,7 @@ pub fn structured_serialize_with_transfer<'s, 'i, R>(
   value: v8::Local<'s, v8::Value>,
   transfer_list: &[v8::Local<'s, v8::Value>],
   host_objects: &R,
-) -> Result<
-  StructuredSerializeWithTransferResult<'s, R::TransferData>,
-  JsErrorBox,
->
+) -> Result<StructuredSerializeWithTransferResult<R::TransferData>, JsErrorBox>
 where
   R: StructuredCloneHostObjectRegistry,
 {
@@ -478,7 +459,7 @@ where
 
   // A pending V8 exception is represented by the existing empty-buffer
   // sentinel. In particular, do not detach anything on that path.
-  if matches!(&serialized, SerializedValue::V8(bytes) if bytes.is_empty()) {
+  if serialized.is_empty() {
     return Ok(StructuredSerializeWithTransferResult {
       serialized,
       transfer_data_holders: Vec::new(),
@@ -528,7 +509,7 @@ fn serialize_v8_graph<'s, 'i, R>(
   host_objects: &R,
   transferred_array_buffers: &[(u32, v8::Local<'s, v8::ArrayBuffer>)],
   transferred_host_objects: &[v8::Local<'s, v8::Object>],
-) -> Result<SerializedValue<'s>, JsErrorBox>
+) -> Result<Vec<u8>, JsErrorBox>
 where
   R: StructuredCloneHostObjectRegistry,
 {
@@ -567,40 +548,32 @@ where
   if tc_scope.has_caught() || tc_scope.has_terminated() {
     tc_scope.rethrow();
     // The pending V8 exception is rethrown by the op dispatcher.
-    return Ok(SerializedValue::V8(vec![]));
+    return Ok(vec![]);
   }
   if written != Some(true) {
     return Err(JsErrorBox::type_error("Failed to serialize value"));
   }
 
-  Ok(SerializedValue::V8(serializer.release()))
+  Ok(serializer.release())
 }
 
 // https://html.spec.whatwg.org/multipage/structured-data.html#structureddeserialize
 pub fn structured_deserialize<'s, 'i, R>(
   scope: &mut v8::PinScope<'s, 'i>,
-  serialized: SerializedValue<'s>,
+  serialized: Vec<u8>,
   target_realm: v8::Local<'s, v8::Context>,
   host_objects: &R,
 ) -> Result<v8::Local<'s, v8::Value>, JsErrorBox>
 where
   R: StructuredCloneHostObjectRegistry,
 {
-  // 4.
-  match serialized {
-    // 5.
-    SerializedValue::Primitive(value) => Ok(value),
-    // 6.~
-    SerializedValue::V8(bytes) => {
-      deserialize_v8_graph(scope, target_realm, &bytes, host_objects, &[], &[])
-    }
-  }
+  deserialize_v8_graph(scope, target_realm, &serialized, host_objects, &[], &[])
 }
 
 // https://html.spec.whatwg.org/multipage/structured-data.html#structureddeserializewithtransfer
 pub fn structured_deserialize_with_transfer<'s, 'i, R>(
   scope: &mut v8::PinScope<'s, 'i>,
-  result: StructuredSerializeWithTransferResult<'s, R::TransferData>,
+  result: StructuredSerializeWithTransferResult<R::TransferData>,
   target_realm: v8::Local<'s, v8::Context>,
   host_objects: &R,
 ) -> Result<StructuredDeserializeWithTransferResult<'s>, JsErrorBox>
@@ -629,17 +602,14 @@ where
     }
   }
 
-  let deserialized = match result.serialized {
-    SerializedValue::Primitive(value) => value,
-    SerializedValue::V8(bytes) => deserialize_v8_graph(
-      scope,
-      target_realm,
-      &bytes,
-      host_objects,
-      &transferred_array_buffers,
-      &transferred_host_objects,
-    )?,
-  };
+  let deserialized = deserialize_v8_graph(
+    scope,
+    target_realm,
+    &result.serialized,
+    host_objects,
+    &transferred_array_buffers,
+    &transferred_host_objects,
+  )?;
 
   Ok(StructuredDeserializeWithTransferResult {
     deserialized,
