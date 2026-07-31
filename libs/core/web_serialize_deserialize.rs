@@ -86,6 +86,8 @@ pub trait StructuredCloneHostObject:
     serializer: &dyn v8::ValueSerializerHelper,
   ) -> Option<bool>;
 
+  /// If the wire format version changes, processing branching may occur for each object.
+  /// https://source.chromium.org/chromium/chromium/src/+/main:third_party/blink/renderer/bindings/core/v8/serialization/v8_script_value_deserializer.cc;l=472-485
   fn read_structured_clone_payload<'s, 'i>(
     scope: &mut v8::PinScope<'s, 'i>,
     deserializer: &dyn v8::ValueDeserializerHelper,
