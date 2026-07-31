@@ -97,6 +97,7 @@ pub trait StructuredCloneHostObject:
   fn write_structured_clone_payload<'s, 'i>(
     &self,
     scope: &mut v8::PinScope<'s, 'i>,
+    context: v8::Local<'s, v8::Context>,
     serializer: &dyn v8::ValueSerializerHelper,
   ) -> Option<bool>;
 
@@ -104,6 +105,7 @@ pub trait StructuredCloneHostObject:
   /// https://source.chromium.org/chromium/chromium/src/+/main:third_party/blink/renderer/bindings/core/v8/serialization/v8_script_value_deserializer.cc;l=472-485
   fn read_structured_clone_payload<'s, 'i>(
     scope: &mut v8::PinScope<'s, 'i>,
+    context: v8::Local<'s, v8::Context>,
     deserializer: &dyn v8::ValueDeserializerHelper,
     wire_format_version: u32,
   ) -> Option<Self>;
@@ -143,13 +145,14 @@ pub fn write_structured_clone_host_object<
   T: StructuredCloneHostObject,
 >(
   scope: &mut v8::PinScope<'s, 'i>,
+  context: v8::Local<'s, v8::Context>,
   object: v8::Local<'s, v8::Object>,
   serializer: &dyn v8::ValueSerializerHelper,
 ) -> Option<bool> {
   let value = crate::cppgc::try_unwrap_cppgc_object::<T>(scope, object.into())?;
   // SAFETY: `object` remains live for this V8 serializer callback.
   let value = unsafe { value.as_ref() };
-  value.write_structured_clone_payload(scope, serializer)
+  value.write_structured_clone_payload(scope, context, serializer)
 }
 
 pub fn read_structured_clone_host_object<
@@ -158,11 +161,16 @@ pub fn read_structured_clone_host_object<
   T: StructuredCloneHostObject,
 >(
   scope: &mut v8::PinScope<'s, 'i>,
+  context: v8::Local<'s, v8::Context>,
   deserializer: &dyn v8::ValueDeserializerHelper,
   wire_format_version: u32,
 ) -> Option<v8::Local<'s, v8::Object>> {
-  let value =
-    T::read_structured_clone_payload(scope, deserializer, wire_format_version)?;
+  let value = T::read_structured_clone_payload(
+    scope,
+    context,
+    deserializer,
+    wire_format_version,
+  )?;
   Some(crate::cppgc::make_cppgc_object(scope, value))
 }
 
@@ -225,6 +233,7 @@ pub trait StructuredCloneHostObjectRegistry {
   fn write_host_object<'s, 'i>(
     &self,
     scope: &mut v8::PinScope<'s, 'i>,
+    context: v8::Local<'s, v8::Context>,
     object: v8::Local<'s, v8::Object>,
     transfer_id: Option<u32>,
     serializer: &dyn v8::ValueSerializerHelper,
@@ -233,6 +242,7 @@ pub trait StructuredCloneHostObjectRegistry {
   fn read_host_object<'s, 'i>(
     &self,
     scope: &mut v8::PinScope<'s, 'i>,
+    context: v8::Local<'s, v8::Context>,
     deserializer: &dyn v8::ValueDeserializerHelper,
     wire_format_version: u32,
     transferred_host_objects: &[v8::Global<v8::Object>],
@@ -262,6 +272,9 @@ pub trait StructuredCloneHostObjectRegistry {
 struct V8SerializerDelegate<'a, R> {
   _for_storage: bool,
   host_objects: &'a R,
+  // Nested host-object values must use the context selected by the caller,
+  // not whichever context happens to be current during a V8 callback.
+  context: v8::Global<v8::Context>,
   // V8 Map provides identity-based lookup that remains valid if V8 moves an
   // object. Do not key a Rust HashMap by Object::get_identity_hash alone: V8
   // explicitly does not guarantee that those hashes are unique.
@@ -299,20 +312,27 @@ where
     object: v8::Local<'s, v8::Object>,
     serializer: &dyn v8::ValueSerializerHelper,
   ) -> Option<bool> {
+    let context = v8::Local::new(scope, &self.context);
     let transferred_host_object_ids =
       v8::Local::new(scope, &self.transferred_host_object_ids);
     let transfer_id = transferred_host_object_ids
       .get(scope, object.into())
       .and_then(|value| value.try_cast::<v8::Uint32>().ok())
       .map(|value| value.value());
-    self
-      .host_objects
-      .write_host_object(scope, object, transfer_id, serializer)
+    self.host_objects.write_host_object(
+      scope,
+      context,
+      object,
+      transfer_id,
+      serializer,
+    )
   }
 }
 
 struct V8DeserializerDelegate<'a, R> {
   host_objects: &'a R,
+  // This is the explicit target realm for nested host-object values.
+  target_realm: v8::Global<v8::Context>,
   wire_format_version: u32,
   transferred_host_objects: Vec<v8::Global<v8::Object>>,
 }
@@ -326,8 +346,10 @@ where
     scope: &mut v8::PinScope<'s, 'i>,
     deserializer: &dyn v8::ValueDeserializerHelper,
   ) -> Option<v8::Local<'s, v8::Object>> {
+    let target_realm = v8::Local::new(scope, &self.target_realm);
     self.host_objects.read_host_object(
       scope,
+      target_realm,
       deserializer,
       self.wire_format_version,
       &self.transferred_host_objects,
@@ -530,6 +552,7 @@ where
     Box::new(V8SerializerDelegate {
       _for_storage: for_storage,
       host_objects,
+      context: v8::Global::new(scope, context),
       transferred_host_object_ids: v8::Global::new(
         scope,
         transferred_host_object_ids,
@@ -640,6 +663,7 @@ where
     scope,
     Box::new(V8DeserializerDelegate {
       host_objects,
+      target_realm: v8::Global::new(scope, target_realm),
       wire_format_version,
       transferred_host_objects: transferred_host_objects
         .iter()

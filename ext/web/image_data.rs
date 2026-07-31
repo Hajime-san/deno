@@ -207,6 +207,7 @@ impl StructuredCloneHostObject for ImageData {
   fn write_structured_clone_payload<'s, 'i>(
     &self,
     scope: &mut v8::PinScope<'s, 'i>,
+    context: v8::Local<'s, v8::Context>,
     serializer: &dyn v8::ValueSerializerHelper,
   ) -> Option<bool> {
     serializer
@@ -221,12 +222,12 @@ impl StructuredCloneHostObject for ImageData {
     serializer.write_uint32(ImageDataSerializationTag::End as u32);
     serializer.write_uint32(self.width);
     serializer.write_uint32(self.height);
-    serializer
-      .write_value(scope.get_current_context(), self.data.get(scope)?.into())
+    serializer.write_value(context, self.data.get(scope)?.into())
   }
 
   fn read_structured_clone_payload<'s, 'i>(
     scope: &mut v8::PinScope<'s, 'i>,
+    context: v8::Local<'s, v8::Context>,
     deserializer: &dyn v8::ValueDeserializerHelper,
     _wire_format_version: u32,
   ) -> Option<Self> {
@@ -266,7 +267,7 @@ impl StructuredCloneHostObject for ImageData {
       return None;
     }
     let data = deserializer
-      .read_value(scope.get_current_context())?
+      .read_value(context)?
       .try_cast::<v8::Object>()
       .ok()?;
     let valid_data_type = match pixel_format {

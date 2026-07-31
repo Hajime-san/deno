@@ -103,11 +103,13 @@ impl StructuredCloneHostObjectTag {
 
 type WriteHandler = for<'s, 'i> fn(
   &mut v8::PinScope<'s, 'i>,
+  v8::Local<'s, v8::Context>,
   v8::Local<'s, v8::Object>,
   &dyn v8::ValueSerializerHelper,
 ) -> Option<bool>;
 type ReadHandler = for<'s, 'i> fn(
   &mut v8::PinScope<'s, 'i>,
+  v8::Local<'s, v8::Context>,
   &dyn v8::ValueDeserializerHelper,
   u32,
 ) -> Option<v8::Local<'s, v8::Object>>;
@@ -362,6 +364,7 @@ impl StructuredCloneHostObjectRegistry
   fn write_host_object<'s, 'i>(
     &self,
     scope: &mut v8::PinScope<'s, 'i>,
+    context: v8::Local<'s, v8::Context>,
     object: v8::Local<'s, v8::Object>,
     transfer_id: Option<u32>,
     serializer: &dyn v8::ValueSerializerHelper,
@@ -376,12 +379,13 @@ impl StructuredCloneHostObjectRegistry
     let interface_name = host_object_interface_name(scope, object)?;
     let (tag, handler) = self.serializable_by_interface.get(interface_name)?;
     serializer.write_raw_bytes(&[*tag as u8]);
-    (handler.write)(scope, object, serializer)
+    (handler.write)(scope, context, object, serializer)
   }
 
   fn read_host_object<'s, 'i>(
     &self,
     scope: &mut v8::PinScope<'s, 'i>,
+    context: v8::Local<'s, v8::Context>,
     deserializer: &dyn v8::ValueDeserializerHelper,
     wire_format_version: u32,
     transferred_host_objects: &[v8::Global<v8::Object>],
@@ -404,7 +408,7 @@ impl StructuredCloneHostObjectRegistry
       .then_some(object);
     }
     let handler = self.serializable_by_tag.get(&tag)?;
-    (handler.read)(scope, deserializer, wire_format_version)
+    (handler.read)(scope, context, deserializer, wire_format_version)
   }
 
   fn validate_transferable_host_object<'s, 'i>(
