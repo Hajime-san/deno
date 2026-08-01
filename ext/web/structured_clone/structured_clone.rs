@@ -398,5 +398,372 @@ pub fn structured_clone<'s, 'i>(
 }
 
 #[cfg(test)]
-#[path = "tests/mod.rs"]
-mod tests;
+#[path = "tests/wire_format_backward_compatibility.rs"]
+mod wire_format_backward_compatibility;
+
+#[cfg(test)]
+mod array_buffer {
+  use std::sync::Arc;
+
+  use deno_core::JsRuntime;
+  use deno_core::RuntimeOptions;
+
+  fn runtime() -> JsRuntime {
+    JsRuntime::new(RuntimeOptions {
+      extensions: vec![
+        deno_webidl::deno_webidl::init(),
+        crate::deno_web::init(
+          Arc::new(crate::BlobStore::default())
+            as Arc<dyn crate::BlobStoreTrait>,
+          None,
+          Default::default(),
+          Default::default(),
+        ),
+      ],
+      ..Default::default()
+    })
+  }
+
+  #[test]
+  fn transfers_array_buffer() {
+    let mut runtime = runtime();
+    runtime
+        .execute_script(
+          "structured_clone_array_buffer_transfer.js",
+          r#"
+            const { structuredClone } = Deno.core.loadExtScript(
+              "ext:deno_web/02_structured_clone.js",
+            );
+            const source = new ArrayBuffer(4);
+            const sourceView = new Uint8Array(source);
+            sourceView.set([1, 2, 3, 4]);
+            const value = { first: source, second: source };
+            const cloned = structuredClone(value, { transfer: [source] });
+            if (source.byteLength !== 0) throw new Error("source was not detached");
+            if (cloned.first !== cloned.second) throw new Error("alias was not preserved");
+            if (cloned.first.byteLength !== 4) throw new Error("invalid clone length");
+            const bytes = new Uint8Array(cloned.first);
+            if (bytes.join(",") !== "1,2,3,4") throw new Error("invalid clone data");
+          "#,
+        )
+        .unwrap();
+  }
+
+  #[test]
+  fn validates_transfer_list_before_detaching() {
+    let mut runtime = runtime();
+    runtime
+        .execute_script(
+          "structured_clone_transfer_validation.js",
+          r#"
+            const { structuredClone } = Deno.core.loadExtScript(
+              "ext:deno_web/02_structured_clone.js",
+            );
+            const duplicate = new ArrayBuffer(4);
+            let duplicateThrew = false;
+            try {
+              structuredClone(null, { transfer: [duplicate, duplicate] });
+            } catch {
+              duplicateThrew = true;
+            }
+            if (!duplicateThrew) throw new Error("duplicate transfer did not throw");
+            if (duplicate.byteLength !== 4) {
+              throw new Error("duplicate transfer detached its source");
+            }
+
+            const serializationFailure = new ArrayBuffer(4);
+            let serializationThrew = false;
+            try {
+              structuredClone(Symbol("not cloneable"), {
+                transfer: [serializationFailure],
+              });
+            } catch {
+              serializationThrew = true;
+            }
+            if (!serializationThrew) throw new Error("serialization failure did not throw");
+            if (serializationFailure.byteLength !== 4) {
+              throw new Error("failed serialization detached its source");
+            }
+
+            const unrelated = new ArrayBuffer(4);
+            const primitive = structuredClone(1, { transfer: [unrelated] });
+            if (primitive !== 1 || unrelated.byteLength !== 0) {
+              throw new Error("unreachable transfer was not processed");
+            }
+          "#,
+        )
+        .unwrap();
+  }
+}
+
+#[cfg(test)]
+mod options {
+  use std::sync::Arc;
+
+  use deno_core::JsRuntime;
+  use deno_core::RuntimeOptions;
+
+  fn runtime() -> JsRuntime {
+    JsRuntime::new(RuntimeOptions {
+      extensions: vec![
+        deno_webidl::deno_webidl::init(),
+        crate::deno_web::init(
+          Arc::new(crate::BlobStore::default())
+            as Arc<dyn crate::BlobStoreTrait>,
+          None,
+          Default::default(),
+          Default::default(),
+        ),
+      ],
+      ..Default::default()
+    })
+  }
+
+  #[test]
+  fn converts_structured_serialize_options_in_rust() {
+    let mut runtime = runtime();
+    runtime
+        .execute_script(
+          "structured_clone_options_conversion.js",
+          r#"
+            const { structuredClone } = Deno.core.loadExtScript(
+              "ext:deno_web/02_structured_clone.js",
+            );
+            let getterCalled = false;
+            const options = {
+              get transfer() {
+                getterCalled = true;
+                return [];
+              },
+            };
+            structuredClone(1, options);
+            if (!getterCalled) throw new Error("transfer getter was not evaluated");
+
+            try {
+              structuredClone(1, 1);
+              throw new Error("non-dictionary options did not throw");
+            } catch (error) {
+              if (!(error instanceof TypeError)) throw error;
+            }
+          "#,
+        )
+        .unwrap();
+  }
+}
+
+#[cfg(test)]
+mod serialization {
+  use std::sync::Arc;
+
+  use deno_core::JsRuntime;
+  use deno_core::RuntimeOptions;
+
+  fn runtime() -> JsRuntime {
+    JsRuntime::new(RuntimeOptions {
+      extensions: vec![
+        deno_webidl::deno_webidl::init(),
+        crate::deno_web::init(
+          Arc::new(crate::BlobStore::default())
+            as Arc<dyn crate::BlobStoreTrait>,
+          None,
+          Default::default(),
+          Default::default(),
+        ),
+      ],
+      ..Default::default()
+    })
+  }
+
+  use deno_core::v8;
+
+  use super::WebStructuredCloneHostObjectRegistry;
+
+  #[test]
+  fn intermediate_serialization_encodes_primitives() {
+    let mut runtime = runtime();
+
+    deno_core::scope!(scope, runtime);
+    let registry = WebStructuredCloneHostObjectRegistry::default();
+    let value: v8::Local<v8::Value> = v8::Integer::new(scope, 42).into();
+    let bytes =
+      deno_core::structured_serialize_internal(scope, value, false, &registry)
+        .unwrap();
+
+    assert!(bytes.starts_with(b"DENO"));
+    let target_realm = scope.get_current_context();
+    let value =
+      deno_core::structured_deserialize(scope, bytes, target_realm, &registry)
+        .unwrap();
+    assert_eq!(value.int32_value(scope), Some(42));
+  }
+}
+
+#[cfg(test)]
+mod test_transferable {
+  use std::cell::Cell;
+
+  use deno_core::GarbageCollected;
+  use deno_core::StructuredCloneTransferable;
+  use deno_core::v8;
+  use deno_error::JsErrorBox;
+
+  pub(super) struct TestTransferable {
+    pub value: u32,
+    pub detached: Cell<bool>,
+  }
+
+  // SAFETY: TestTransferable contains no references requiring GC tracing.
+  unsafe impl GarbageCollected for TestTransferable {
+    fn trace(&self, _visitor: &mut v8::cppgc::Visitor) {}
+
+    fn get_name(&self) -> &'static std::ffi::CStr {
+      <Self as deno_core::WebIdlInterface>::INTERFACE_NAME
+    }
+  }
+
+  impl StructuredCloneTransferable for TestTransferable {
+    type TransferData = u32;
+
+    fn validate_transfer(&self) -> Result<(), JsErrorBox> {
+      if self.detached.get() {
+        return Err(JsErrorBox::new(
+          "DOMExceptionDataCloneError",
+          "TestTransferable is detached",
+        ));
+      }
+      Ok(())
+    }
+
+    fn transfer<'s, 'i>(
+      &self,
+      _scope: &mut v8::PinScope<'s, 'i>,
+    ) -> Result<Self::TransferData, JsErrorBox> {
+      self.detached.set(true);
+      Ok(self.value)
+    }
+
+    fn receive<'s, 'i>(
+      _scope: &mut v8::PinScope<'s, 'i>,
+      value: Self::TransferData,
+    ) -> Result<Self, JsErrorBox> {
+      Ok(Self {
+        value,
+        detached: Cell::new(false),
+      })
+    }
+  }
+
+  impl deno_core::WebIdlInterface for TestTransferable {
+    const INTERFACE_NAME: &'static std::ffi::CStr = c"TestTransferable";
+  }
+
+  impl deno_core::WebIdlTransferable for TestTransferable {}
+}
+
+#[cfg(test)]
+mod host_object_transfer {
+  use std::sync::Arc;
+
+  use deno_core::JsRuntime;
+  use deno_core::RuntimeOptions;
+  use deno_core::v8;
+
+  use super::StructuredCloneHostObjectTag;
+  use super::WebStructuredCloneHostObjectRegistry;
+  use super::test_transferable::TestTransferable;
+
+  fn runtime() -> JsRuntime {
+    JsRuntime::new(RuntimeOptions {
+      extensions: vec![
+        deno_webidl::deno_webidl::init(),
+        crate::deno_web::init(
+          Arc::new(crate::BlobStore::default())
+            as Arc<dyn crate::BlobStoreTrait>,
+          None,
+          Default::default(),
+          Default::default(),
+        ),
+      ],
+      ..Default::default()
+    })
+  }
+
+  #[test]
+  fn resolves_host_object_transfer_reference() {
+    let mut runtime = runtime();
+    deno_core::scope!(scope, runtime);
+    let context = scope.get_current_context();
+    let mut registry = WebStructuredCloneHostObjectRegistry::default();
+    registry.register_transferable::<TestTransferable>(
+      StructuredCloneHostObjectTag::TestTransferable,
+    );
+    let first_source = deno_core::cppgc::make_cppgc_object(
+      scope,
+      TestTransferable {
+        value: 42,
+        detached: std::cell::Cell::new(false),
+      },
+    );
+    let second_source = deno_core::cppgc::make_cppgc_object(
+      scope,
+      TestTransferable {
+        value: 43,
+        detached: std::cell::Cell::new(false),
+      },
+    );
+    let graph = v8::Object::new(scope);
+    let first_key = v8::String::new(scope, "first").unwrap();
+    let alias_key = v8::String::new(scope, "alias").unwrap();
+    let second_key = v8::String::new(scope, "second").unwrap();
+    assert_eq!(
+      graph.set(scope, first_key.into(), first_source.into()),
+      Some(true)
+    );
+    assert_eq!(
+      graph.set(scope, alias_key.into(), first_source.into()),
+      Some(true)
+    );
+    assert_eq!(
+      graph.set(scope, second_key.into(), second_source.into()),
+      Some(true)
+    );
+
+    let result = deno_core::structured_serialize_with_transfer(
+      scope,
+      graph.into(),
+      &[first_source.into(), second_source.into()],
+      &registry,
+    )
+    .unwrap();
+    for source in [first_source, second_source] {
+      let source_value = deno_core::cppgc::try_unwrap_cppgc_object::<
+        TestTransferable,
+      >(scope, source.into())
+      .unwrap();
+      assert!(source_value.detached.get());
+    }
+
+    let result = deno_core::structured_deserialize_with_transfer(
+      scope, result, context, &registry,
+    )
+    .unwrap();
+    assert_eq!(result.transferred_values.len(), 2);
+    let cloned_graph = result.deserialized.try_cast::<v8::Object>().unwrap();
+    for (key, transfer_id, expected) in
+      [(first_key, 0, 42), (alias_key, 0, 42), (second_key, 1, 43)]
+    {
+      let cloned = cloned_graph
+        .get(scope, key.into())
+        .unwrap()
+        .try_cast::<v8::Object>()
+        .unwrap();
+      assert_eq!(cloned, result.transferred_values[transfer_id]);
+      let cloned_value = deno_core::cppgc::try_unwrap_cppgc_object::<
+        TestTransferable,
+      >(scope, cloned.into())
+      .unwrap();
+      assert_eq!(cloned_value.value, expected);
+      assert!(!cloned_value.detached.get());
+    }
+  }
+}
