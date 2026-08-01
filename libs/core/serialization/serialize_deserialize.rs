@@ -47,6 +47,7 @@ pub struct StructuredDeserializeWithTransferResult<'s> {
   pub transferred_values: Vec<v8::Local<'s, v8::Value>>,
 }
 
+// https://source.chromium.org/chromium/chromium/src/+/main:v8/src/objects/value-serializer.cc
 // https://source.chromium.org/chromium/chromium/src/+/main:third_party/blink/renderer/bindings/core/v8/serialization/v8_script_value_serializer.cc
 // https://source.chromium.org/chromium/chromium/src/+/main:third_party/blink/renderer/bindings/core/v8/serialization/v8_script_value_deserializer.cc
 // https://source.chromium.org/chromium/chromium/src/+/main:third_party/blink/renderer/bindings/core/v8/serialization/serialization_tag.h
@@ -137,6 +138,10 @@ pub trait WebIdlTransferable: WebIdlInterface {}
 pub trait StructuredCloneHostObject:
   WebIdlSerializable + GarbageCollected + Sized + 'static
 {
+  /// Spec sometimes outline a specific order of operations,
+  /// however unless there are specific dependencies, we don't need to keep up to it.
+  /// e.g.,
+  /// https://html.spec.whatwg.org/multipage/imagebitmap-and-animations.html#imagedata
   fn write_structured_clone_payload<'s, 'i>(
     &self,
     scope: &mut v8::PinScope<'s, 'i>,
@@ -144,7 +149,7 @@ pub trait StructuredCloneHostObject:
     serializer: &dyn v8::ValueSerializerHelper,
   ) -> Option<bool>;
 
-  /// If the wire format version changes, processing branching may occur for each object.
+  /// Keep up the backward compatibility when the wire format version changes
   /// https://source.chromium.org/chromium/chromium/src/+/main:third_party/blink/renderer/bindings/core/v8/serialization/v8_script_value_deserializer.cc;l=472-485
   fn read_structured_clone_payload<'s, 'i>(
     scope: &mut v8::PinScope<'s, 'i>,
@@ -214,6 +219,7 @@ pub fn read_structured_clone_host_object<
     deserializer,
     wire_format_version,
   )?;
+  // FIXME: throw DataCloneError if its None
   Some(crate::cppgc::make_cppgc_object(scope, value))
 }
 
