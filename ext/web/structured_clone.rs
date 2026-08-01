@@ -1,86 +1,21 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
 use std::any::Any;
-use std::borrow::Cow;
 use std::collections::HashMap;
 
 use deno_core::OpState;
 use deno_core::StructuredCloneHostObjectRegistry;
+pub use deno_core::StructuredCloneHostObjectTag;
 use deno_core::StructuredDeserializeWithTransferResult;
 use deno_core::op2;
 use deno_core::read_structured_clone_host_object;
 use deno_core::structured_deserialize_with_transfer;
 use deno_core::structured_serialize_with_transfer;
 use deno_core::v8;
-use deno_core::webidl::ContextFn;
-use deno_core::webidl::WebIdlConverter;
-use deno_core::webidl::WebIdlError;
-use deno_core::webidl::WebIdlErrorKind;
 use deno_core::write_structured_clone_host_object;
 use deno_error::JsErrorBox;
 
 use crate::image_data::ImageData;
-
-// https://source.chromium.org/chromium/chromium/src/+/main:third_party/blink/renderer/bindings/core/v8/serialization/v8_script_value_serializer.cc
-// https://source.chromium.org/chromium/chromium/src/+/main:third_party/blink/renderer/bindings/core/v8/serialization/v8_script_value_deserializer.cc
-// https://source.chromium.org/chromium/chromium/src/+/main:third_party/blink/renderer/bindings/core/v8/serialization/serialization_tag.h
-
-/// Version of the Deno-controlled envelope and all host-object payloads. It is
-/// the backward-compatibility boundary for bytes that outlive the runtime that
-/// wrote them. In particular, IndexedDB stores values produced by
-/// StructuredSerializeForStorage and a newer Deno may read those values later:
-/// https://w3c.github.io/IndexedDB/#value-construct
-///
-/// New readers must therefore preserve decoding of older payloads. `ImageData` is
-/// an example of how to evolve a payload compatibly: its settings are optional
-/// subtags terminated by End. If an older payload has no `PredefinedColorSpace` or
-/// `PixelFormat` subtag, the reader falls back to the Web API defaults, `srgb` and
-/// `rgba-unorm8`. Adding another optional subtag with a compatible default does
-/// not require a version bump. This guarantees new-reader/old-data compatibility;
-/// it does not require an old reader to understand a new subtag.
-///
-/// Bump this version when old bytes require a different interpretation, such as:
-/// - changing the order, width, encoding, or meaning of existing payload data;
-/// - changing the interpretation of an existing host-object tag or subtag;
-/// - adding, removing, or changing a required field without a compatible
-///   default.
-///
-/// A new self-contained host-object tag also does not by itself require a bump.
-///
-/// When bumping the version, each affected host-object reader must branch at
-/// the version boundary and retain the old decoding path for stored payloads.
-/// Unaffected readers continue using the same path for both versions.
-const WEB_STRUCTURED_CLONE_WIRE_FORMAT_VERSION: u32 = 1;
-
-static TRANSFER_STR: deno_core::FastStaticString =
-  deno_core::ascii_str!("transfer");
-
-// Host-object tags are written as exactly one raw byte before the type-specific
-// payload. Values are permanent wire identifiers: never renumber, reorder by
-// implicit discriminant, or reuse a retired value.
-// https://source.chromium.org/chromium/chromium/src/+/main:third_party/blink/renderer/bindings/core/v8/serialization/serialization_tag.h
-#[derive(Clone, Copy, Eq, Hash, PartialEq)]
-#[repr(u8)]
-pub enum StructuredCloneHostObjectTag {
-  // settings:(ImageDataSerializationTag, value)*, End, width:uint32,
-  // height:uint32, data:V8 value -> ImageData (ref)
-  ImageData = b'#',
-  #[cfg(test)]
-  TestTransferable = b'~',
-}
-
-impl StructuredCloneHostObjectTag {
-  fn from_tag(tag: u8) -> Option<Self> {
-    match tag {
-      tag if tag == Self::ImageData as u8 => Some(Self::ImageData),
-      #[cfg(test)]
-      tag if tag == Self::TestTransferable as u8 => {
-        Some(Self::TestTransferable)
-      }
-      _ => None,
-    }
-  }
-}
 
 type WriteHandler = for<'s, 'i> fn(
   &mut v8::PinScope<'s, 'i>,
@@ -252,68 +187,6 @@ impl Default for WebStructuredCloneHostObjectRegistry {
   }
 }
 
-#[cfg(test)]
-mod test_transferable {
-  use std::cell::Cell;
-
-  use deno_core::GarbageCollected;
-  use deno_core::StructuredCloneTransferable;
-  use deno_core::v8;
-  use deno_error::JsErrorBox;
-
-  pub(super) struct TestTransferable {
-    pub value: u32,
-    pub detached: Cell<bool>,
-  }
-
-  // SAFETY: TestTransferable contains no references requiring GC tracing.
-  unsafe impl GarbageCollected for TestTransferable {
-    fn trace(&self, _visitor: &mut v8::cppgc::Visitor) {}
-
-    fn get_name(&self) -> &'static std::ffi::CStr {
-      <Self as deno_core::WebIdlInterface>::INTERFACE_NAME
-    }
-  }
-
-  impl StructuredCloneTransferable for TestTransferable {
-    type TransferData = u32;
-
-    fn validate_transfer(&self) -> Result<(), JsErrorBox> {
-      if self.detached.get() {
-        return Err(JsErrorBox::new(
-          "DOMExceptionDataCloneError",
-          "TestTransferable is detached",
-        ));
-      }
-      Ok(())
-    }
-
-    fn transfer<'s, 'i>(
-      &self,
-      _scope: &mut v8::PinScope<'s, 'i>,
-    ) -> Result<Self::TransferData, JsErrorBox> {
-      self.detached.set(true);
-      Ok(self.value)
-    }
-
-    fn receive<'s, 'i>(
-      _scope: &mut v8::PinScope<'s, 'i>,
-      value: Self::TransferData,
-    ) -> Result<Self, JsErrorBox> {
-      Ok(Self {
-        value,
-        detached: Cell::new(false),
-      })
-    }
-  }
-
-  impl deno_core::WebIdlInterface for TestTransferable {
-    const INTERFACE_NAME: &'static std::ffi::CStr = c"TestTransferable";
-  }
-
-  impl deno_core::WebIdlTransferable for TestTransferable {}
-}
-
 fn host_object_interface_name(
   scope: &mut v8::Isolate,
   object: v8::Local<v8::Object>,
@@ -327,7 +200,7 @@ impl StructuredCloneHostObjectRegistry
   type TransferData = WebStructuredCloneTransferData;
 
   fn wire_format_version(&self) -> u32 {
-    WEB_STRUCTURED_CLONE_WIRE_FORMAT_VERSION
+    deno_core::STRUCTURED_CLONE_WIRE_FORMAT_VERSION
   }
 
   fn is_host_object<'s, 'i>(
@@ -444,47 +317,6 @@ impl StructuredCloneHostObjectRegistry
   }
 }
 
-struct StructuredSerializeOptions<'s> {
-  transfer: Vec<v8::Local<'s, v8::Value>>,
-}
-
-impl<'s> StructuredSerializeOptions<'s> {
-  fn convert<'i>(
-    scope: &mut v8::PinScope<'s, 'i>,
-    value: Option<v8::Local<'s, v8::Value>>,
-  ) -> Result<Self, WebIdlError> {
-    let Some(value) = value.filter(|value| !value.is_null_or_undefined())
-    else {
-      return Ok(Self { transfer: vec![] });
-    };
-    let object = value.try_cast::<v8::Object>().map_err(|_| {
-      WebIdlError::new(
-        Cow::Borrowed("Failed to execute 'structuredClone'"),
-        ContextFn::new_borrowed(&|| Cow::Borrowed("Argument 2")),
-        WebIdlErrorKind::ConvertToConverterType("dictionary"),
-      )
-    })?;
-    let key = TRANSFER_STR.v8_string(scope).unwrap();
-    let transfer = object
-      .get(scope, key.into())
-      .unwrap_or_else(|| v8::undefined(scope).into());
-    let transfer = if transfer.is_undefined() {
-      vec![]
-    } else {
-      Vec::<v8::Local<v8::Value>>::convert(
-        scope,
-        transfer,
-        Cow::Borrowed("Failed to execute 'structuredClone'"),
-        ContextFn::new_borrowed(&|| {
-          Cow::Borrowed("'transfer' of 'StructuredSerializeOptions'")
-        }),
-        &Default::default(),
-      )?
-    };
-    Ok(Self { transfer })
-  }
-}
-
 // https://html.spec.whatwg.org/multipage/structured-data.html#dom-structuredclone
 #[op2]
 pub fn structured_clone<'s, 'i>(
@@ -499,7 +331,7 @@ pub fn structured_clone<'s, 'i>(
   let registry = state
     .borrow::<WebStructuredCloneHostObjectRegistry>()
     .clone();
-  let options = StructuredSerializeOptions::convert(scope, options)
+  let options = deno_core::StructuredSerializeOptions::convert(scope, options)
     .map_err(JsErrorBox::from_err)?;
 
   // Primitives have no identity to reconstruct. Keep this optimization at the
@@ -529,6 +361,68 @@ pub fn structured_clone<'s, 'i>(
     )?;
 
   Ok(deserialized)
+}
+
+#[cfg(test)]
+mod test_transferable {
+  use std::cell::Cell;
+
+  use deno_core::GarbageCollected;
+  use deno_core::StructuredCloneTransferable;
+  use deno_core::v8;
+  use deno_error::JsErrorBox;
+
+  pub(super) struct TestTransferable {
+    pub value: u32,
+    pub detached: Cell<bool>,
+  }
+
+  // SAFETY: TestTransferable contains no references requiring GC tracing.
+  unsafe impl GarbageCollected for TestTransferable {
+    fn trace(&self, _visitor: &mut v8::cppgc::Visitor) {}
+
+    fn get_name(&self) -> &'static std::ffi::CStr {
+      <Self as deno_core::WebIdlInterface>::INTERFACE_NAME
+    }
+  }
+
+  impl StructuredCloneTransferable for TestTransferable {
+    type TransferData = u32;
+
+    fn validate_transfer(&self) -> Result<(), JsErrorBox> {
+      if self.detached.get() {
+        return Err(JsErrorBox::new(
+          "DOMExceptionDataCloneError",
+          "TestTransferable is detached",
+        ));
+      }
+      Ok(())
+    }
+
+    fn transfer<'s, 'i>(
+      &self,
+      _scope: &mut v8::PinScope<'s, 'i>,
+    ) -> Result<Self::TransferData, JsErrorBox> {
+      self.detached.set(true);
+      Ok(self.value)
+    }
+
+    fn receive<'s, 'i>(
+      _scope: &mut v8::PinScope<'s, 'i>,
+      value: Self::TransferData,
+    ) -> Result<Self, JsErrorBox> {
+      Ok(Self {
+        value,
+        detached: Cell::new(false),
+      })
+    }
+  }
+
+  impl deno_core::WebIdlInterface for TestTransferable {
+    const INTERFACE_NAME: &'static std::ffi::CStr = c"TestTransferable";
+  }
+
+  impl deno_core::WebIdlTransferable for TestTransferable {}
 }
 
 #[cfg(test)]

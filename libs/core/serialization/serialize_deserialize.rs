@@ -1,11 +1,17 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
+use std::borrow::Cow;
+
 use deno_core::v8;
 use deno_core::v8::ValueDeserializerHelper;
 use deno_core::v8::ValueSerializerHelper;
 use deno_error::JsErrorBox;
 
 use crate::cppgc::GarbageCollected;
+use crate::webidl::ContextFn;
+use crate::webidl::WebIdlConverter;
+use crate::webidl::WebIdlError;
+use crate::webidl::WebIdlErrorKind;
 
 // The structuredClone implementation does not correspond one-to-one with the
 // steps in the WHATWG spec.
@@ -41,6 +47,10 @@ pub struct StructuredDeserializeWithTransferResult<'s> {
   pub transferred_values: Vec<v8::Local<'s, v8::Value>>,
 }
 
+// https://source.chromium.org/chromium/chromium/src/+/main:third_party/blink/renderer/bindings/core/v8/serialization/v8_script_value_serializer.cc
+// https://source.chromium.org/chromium/chromium/src/+/main:third_party/blink/renderer/bindings/core/v8/serialization/v8_script_value_deserializer.cc
+// https://source.chromium.org/chromium/chromium/src/+/main:third_party/blink/renderer/bindings/core/v8/serialization/serialization_tag.h
+
 // Deno wraps V8's serialized data in an embedder-controlled version envelope:
 //
 //   "DENO" | embedder version:uint32(varint) | V8 header | V8 payload
@@ -52,6 +62,39 @@ pub struct StructuredDeserializeWithTransferResult<'s> {
 // can be distinguished if compatibility is needed later. Increment the
 // registry's version whenever an existing Deno payload changes incompatibly.
 const EMBEDDER_MAGIC: &[u8; 4] = b"DENO";
+
+/// Version of the Deno-controlled structured-clone envelope and host-object
+/// payloads. Persisted structured-clone data must remain readable by newer
+/// runtimes, so this is owned by the serialization layer rather than a Web API
+/// implementation.
+pub const STRUCTURED_CLONE_WIRE_FORMAT_VERSION: u32 = 1;
+
+// Host-object tags are written as exactly one raw byte before the type-specific
+// payload. Values are permanent wire identifiers: never renumber, reorder by
+// implicit discriminant, or reuse a retired value.
+// https://source.chromium.org/chromium/chromium/src/+/main:third_party/blink/renderer/bindings/core/v8/serialization/serialization_tag.h
+#[derive(Clone, Copy, Eq, Hash, PartialEq)]
+#[repr(u8)]
+pub enum StructuredCloneHostObjectTag {
+  // settings:(ImageDataSerializationTag, value)*, End, width:uint32,
+  // height:uint32, data:V8 value -> ImageData
+  ImageData = b'#',
+  // Test-only host object used by structured-clone tests. Keep its wire value
+  // reserved even though the implementation is not part of the Web API.
+  TestTransferable = b'~',
+}
+
+impl StructuredCloneHostObjectTag {
+  pub fn from_tag(tag: u8) -> Option<Self> {
+    match tag {
+      tag if tag == Self::ImageData as u8 => Some(Self::ImageData),
+      tag if tag == Self::TestTransferable as u8 => {
+        Some(Self::TestTransferable)
+      }
+      _ => None,
+    }
+  }
+}
 
 // V8's WriteUint32 uses a base-128 varint: each byte contributes seven value
 // bits and the high bit indicates that another byte follows. Four bytes carry
@@ -711,6 +754,49 @@ fn read_embedder_envelope(bytes: &[u8]) -> Result<(u32, &[u8]), JsErrorBox> {
   Err(JsErrorBox::range_error(
     "Cannot deserialize structured clone version",
   ))
+}
+
+static TRANSFER_STR: crate::FastStaticString = crate::ascii_str!("transfer");
+
+pub struct StructuredSerializeOptions<'s> {
+  pub transfer: Vec<v8::Local<'s, v8::Value>>,
+}
+
+impl<'s> StructuredSerializeOptions<'s> {
+  pub fn convert<'i>(
+    scope: &mut v8::PinScope<'s, 'i>,
+    value: Option<v8::Local<'s, v8::Value>>,
+  ) -> Result<Self, WebIdlError> {
+    let Some(value) = value.filter(|value| !value.is_null_or_undefined())
+    else {
+      return Ok(Self { transfer: vec![] });
+    };
+    let object = value.try_cast::<v8::Object>().map_err(|_| {
+      WebIdlError::new(
+        Cow::Borrowed("Failed to execute 'structuredClone'"),
+        ContextFn::new_borrowed(&|| Cow::Borrowed("Argument 2")),
+        WebIdlErrorKind::ConvertToConverterType("dictionary"),
+      )
+    })?;
+    let key = TRANSFER_STR.v8_string(scope).unwrap();
+    let transfer = object
+      .get(scope, key.into())
+      .unwrap_or_else(|| v8::undefined(scope).into());
+    let transfer = if transfer.is_undefined() {
+      vec![]
+    } else {
+      Vec::<v8::Local<'s, v8::Value>>::convert(
+        scope,
+        transfer,
+        Cow::Borrowed("Failed to execute 'structuredClone'"),
+        ContextFn::new_borrowed(&|| {
+          Cow::Borrowed("'transfer' of 'StructuredSerializeOptions'")
+        }),
+        &Default::default(),
+      )?
+    };
+    Ok(Self { transfer })
+  }
 }
 
 #[cfg(test)]

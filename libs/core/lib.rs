@@ -36,6 +36,7 @@ pub mod reactor;
 #[cfg(feature = "reactor-tokio")]
 pub mod reactor_tokio;
 mod runtime;
+pub mod serialization;
 mod source_map;
 mod tasks;
 #[allow(
@@ -44,7 +45,6 @@ mod tasks;
   reason = "generated bindings match external API naming"
 )]
 pub mod uv_compat;
-mod web_serialize_deserialize;
 mod web_timeout;
 pub mod webidl;
 
@@ -203,30 +203,33 @@ pub use crate::runtime::host_defined_options::read_host_defined_options_kind;
 pub use crate::runtime::host_defined_options::register_external_module_import_meta_cb;
 pub use crate::runtime::host_defined_options::register_vm_dynamic_import_callback;
 pub use crate::runtime::stats;
+pub use crate::serialization::STRUCTURED_CLONE_WIRE_FORMAT_VERSION;
+pub use crate::serialization::StructuredCloneHostObject;
+pub use crate::serialization::StructuredCloneHostObjectRegistry;
+pub use crate::serialization::StructuredCloneHostObjectTag;
+pub use crate::serialization::StructuredCloneTransferData;
+pub use crate::serialization::StructuredCloneTransferable;
+pub use crate::serialization::StructuredDeserializeWithTransferResult;
+pub use crate::serialization::StructuredSerializeOptions;
+pub use crate::serialization::StructuredSerializeWithTransferResult;
+pub use crate::serialization::WebIdlInterface;
+pub use crate::serialization::WebIdlSerializable;
+pub use crate::serialization::WebIdlTransferable;
+pub use crate::serialization::is_structured_clone_host_object;
+pub use crate::serialization::read_structured_clone_host_object;
+pub use crate::serialization::receive_structured_clone_host_object;
+pub use crate::serialization::structured_deserialize;
+pub use crate::serialization::structured_deserialize_with_transfer;
+pub use crate::serialization::structured_serialize_internal;
+pub use crate::serialization::structured_serialize_with_transfer;
+pub use crate::serialization::transfer_structured_clone_host_object;
+pub use crate::serialization::validate_structured_clone_transferable;
+pub use crate::serialization::write_structured_clone_host_object;
 pub use crate::source_map::SourceMapApplication;
 pub use crate::source_map::SourceMapData;
 pub use crate::source_map::SourceMapper;
 pub use crate::tasks::V8CrossThreadTaskSpawner;
 pub use crate::tasks::V8TaskSpawner;
-pub use crate::web_serialize_deserialize::StructuredCloneHostObject;
-pub use crate::web_serialize_deserialize::StructuredCloneHostObjectRegistry;
-pub use crate::web_serialize_deserialize::StructuredCloneTransferData;
-pub use crate::web_serialize_deserialize::StructuredCloneTransferable;
-pub use crate::web_serialize_deserialize::StructuredDeserializeWithTransferResult;
-pub use crate::web_serialize_deserialize::StructuredSerializeWithTransferResult;
-pub use crate::web_serialize_deserialize::WebIdlInterface;
-pub use crate::web_serialize_deserialize::WebIdlSerializable;
-pub use crate::web_serialize_deserialize::WebIdlTransferable;
-pub use crate::web_serialize_deserialize::is_structured_clone_host_object;
-pub use crate::web_serialize_deserialize::read_structured_clone_host_object;
-pub use crate::web_serialize_deserialize::receive_structured_clone_host_object;
-pub use crate::web_serialize_deserialize::structured_deserialize;
-pub use crate::web_serialize_deserialize::structured_deserialize_with_transfer;
-pub use crate::web_serialize_deserialize::structured_serialize_internal;
-pub use crate::web_serialize_deserialize::structured_serialize_with_transfer;
-pub use crate::web_serialize_deserialize::transfer_structured_clone_host_object;
-pub use crate::web_serialize_deserialize::validate_structured_clone_transferable;
-pub use crate::web_serialize_deserialize::write_structured_clone_host_object;
 
 // Ensure we can use op2 in deno_core without any hackery.
 extern crate self as deno_core;
