@@ -403,7 +403,6 @@ where
 // https://html.spec.whatwg.org/multipage/structured-data.html#structuredserializeinternal
 pub fn structured_serialize_internal<'s, 'i, R>(
   scope: &mut v8::PinScope<'s, 'i>,
-  context: v8::Local<'s, v8::Context>,
   value: v8::Local<'s, v8::Value>,
   for_storage: bool,
   host_objects: &R,
@@ -411,6 +410,7 @@ pub fn structured_serialize_internal<'s, 'i, R>(
 where
   R: StructuredCloneHostObjectRegistry,
 {
+  let context = scope.get_current_context();
   structured_serialize_internal_with_transfers(
     scope,
     context,
@@ -465,7 +465,6 @@ fn data_clone_error(message: impl Into<String>) -> JsErrorBox {
 // https://html.spec.whatwg.org/multipage/structured-data.html#structuredserializewithtransfer
 pub fn structured_serialize_with_transfer<'s, 'i, R>(
   scope: &mut v8::PinScope<'s, 'i>,
-  context: v8::Local<'s, v8::Context>,
   value: v8::Local<'s, v8::Value>,
   transfer_list: &[v8::Local<'s, v8::Value>],
   host_objects: &R,
@@ -473,6 +472,7 @@ pub fn structured_serialize_with_transfer<'s, 'i, R>(
 where
   R: StructuredCloneHostObjectRegistry,
 {
+  let context = scope.get_current_context();
   let mut prepared = Vec::with_capacity(transfer_list.len());
   let mut transferred_array_buffers = Vec::new();
   let mut transferred_host_objects = Vec::new();

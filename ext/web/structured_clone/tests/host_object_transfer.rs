@@ -44,7 +44,6 @@ fn resolves_host_object_transfer_reference() {
 
   let result = deno_core::structured_serialize_with_transfer(
     scope,
-    context,
     graph.into(),
     &[first_source.into(), second_source.into()],
     &registry,

@@ -362,10 +362,6 @@ pub fn structured_clone<'s, 'i>(
   value: v8::Local<'s, v8::Value>,
   options: Option<v8::Local<'s, v8::Value>>,
 ) -> Result<v8::Local<'s, v8::Value>, JsErrorBox> {
-  // FIXME:
-  // getting current realm should call inside of
-  // StructuredSerialize/StructuredDeserialize
-  let context = scope.get_current_context();
   let registry = web_structured_clone_host_object_registry();
   let options = deno_core::StructuredSerializeOptions::convert(scope, options)
     .map_err(JsErrorBox::from_err)?;
@@ -386,13 +382,17 @@ pub fn structured_clone<'s, 'i>(
 
   let serialized = structured_serialize_with_transfer(
     scope,
-    context,
     value,
     &options.transfer,
     registry,
   )?;
   let StructuredDeserializeWithTransferResult { deserialized, .. } =
-    structured_deserialize_with_transfer(scope, serialized, context, registry)?;
+    structured_deserialize_with_transfer(
+      scope,
+      serialized,
+      scope.get_current_context(),
+      registry,
+    )?;
 
   Ok(deserialized)
 }

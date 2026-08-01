@@ -18,13 +18,11 @@ fn image_data_v1_wire_format() {
     .unwrap();
 
   deno_core::scope!(scope, runtime);
-  let context = scope.get_current_context();
   let registry = WebStructuredCloneHostObjectRegistry::default();
   let value = deno_core::v8::Local::new(scope, value);
-  let bytes = deno_core::structured_serialize_internal(
-    scope, context, value, false, &registry,
-  )
-  .unwrap();
+  let bytes =
+    deno_core::structured_serialize_internal(scope, value, false, &registry)
+      .unwrap();
 
   assert_eq!(bytes, IMAGE_DATA_V1_V8_16);
 }
