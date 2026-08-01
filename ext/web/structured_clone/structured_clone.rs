@@ -428,6 +428,9 @@ pub fn structured_clone<'s, 'i>(
   value: v8::Local<'s, v8::Value>,
   options: Option<v8::Local<'s, v8::Value>>,
 ) -> Result<v8::Local<'s, v8::Value>, JsErrorBox> {
+  // FIXME:
+  // getting current realm should call inside of
+  // StructuredSerialize/StructuredDeserialize
   let context = scope.get_current_context();
   // Serialization can invoke user code, so do not keep OpState borrowed while
   // V8 walks the graph.
