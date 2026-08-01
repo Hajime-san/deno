@@ -589,7 +589,7 @@ mod serialization {
       deno_core::structured_serialize_internal(scope, value, false, &registry)
         .unwrap();
 
-    assert!(bytes.starts_with(b"DENO"));
+    assert!(bytes.starts_with(&[0xFE]));
     let target_realm = scope.get_current_context();
     let value =
       deno_core::structured_deserialize(scope, bytes, target_realm, &registry)

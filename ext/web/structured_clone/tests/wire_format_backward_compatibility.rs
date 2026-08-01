@@ -47,7 +47,7 @@ fn get_property<'s>(
 // Deno-controlled bytes changed before deciding whether to bump its version.
 
 const IMAGE_DATA_V1_V8_16: &[u8] = &[
-  b'D', b'E', b'N', b'O', // Deno embedder magic
+  0xFE, // Deno envelope tag
   0x01, // Deno wire format version 1
   0xFF, 0x10, // V8 wire format header, version 16
   0x5C, // V8 host-object tag

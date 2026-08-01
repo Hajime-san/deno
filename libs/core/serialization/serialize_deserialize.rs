@@ -54,15 +54,14 @@ pub struct StructuredDeserializeWithTransferResult<'s> {
 
 // Deno wraps V8's serialized data in an embedder-controlled version envelope:
 //
-//   "DENO" | embedder version:uint32(varint) | V8 header | V8 payload
+//   0xFE | Deno version:uint32(varint) | V8 header | V8 payload
 //
 // The outer version covers Deno host-object tags and payloads, while the inner
 // V8 header carries V8's independently versioned wire format. The envelope is
-// consumed before constructing the V8 deserializer. The multi-byte magic does
-// not collide with V8's 0xFF version header, so an unversioned legacy payload
-// can be distinguished if compatibility is needed later. Increment the
-// registry's version whenever an existing Deno payload changes incompatibly.
-const EMBEDDER_MAGIC: &[u8; 4] = b"DENO";
+// consumed before constructing the V8 deserializer. The single-byte marker is
+// distinct from V8's 0xFF version header. Increment the registry's version
+// whenever an existing Deno payload changes incompatibly.
+const EMBEDDER_ENVELOPE_TAG: u8 = 0xFE;
 
 /// Version of the Deno-controlled structured-clone envelope and host-object
 /// payloads. Persisted structured-clone data must remain readable by newer
@@ -608,7 +607,7 @@ where
       ),
     }),
   );
-  serializer.write_raw_bytes(EMBEDDER_MAGIC);
+  serializer.write_raw_bytes(&[EMBEDDER_ENVELOPE_TAG]);
   serializer.write_uint32(host_objects.wire_format_version());
   serializer.write_header();
   for (transfer_id, array_buffer) in transferred_array_buffers {
@@ -733,7 +732,7 @@ where
 }
 
 fn read_embedder_envelope(bytes: &[u8]) -> Result<(u32, &[u8]), JsErrorBox> {
-  if !bytes.starts_with(EMBEDDER_MAGIC) {
+  if bytes.first() != Some(&EMBEDDER_ENVELOPE_TAG) {
     return Err(JsErrorBox::range_error(
       "Cannot deserialize structured clone magic",
     ));
@@ -741,7 +740,7 @@ fn read_embedder_envelope(bytes: &[u8]) -> Result<(u32, &[u8]), JsErrorBox> {
 
   let mut version = 0u32;
   for index in 0..U32_VARINT_MAX_BYTES {
-    let byte = *bytes.get(EMBEDDER_MAGIC.len() + index).ok_or_else(|| {
+    let byte = *bytes.get(1 + index).ok_or_else(|| {
       JsErrorBox::range_error("Cannot deserialize structured clone version")
     })?;
     let value = byte & VARINT_VALUE_MASK;
@@ -753,7 +752,7 @@ fn read_embedder_envelope(bytes: &[u8]) -> Result<(u32, &[u8]), JsErrorBox> {
     }
     version |= (value as u32) << (index * VARINT_VALUE_BITS_PER_BYTE);
     if byte & VARINT_CONTINUATION_BIT == 0 {
-      return Ok((version, &bytes[EMBEDDER_MAGIC.len() + index + 1..]));
+      return Ok((version, &bytes[index + 2..]));
     }
   }
 
@@ -807,19 +806,23 @@ impl<'s> StructuredSerializeOptions<'s> {
 
 #[cfg(test)]
 mod tests {
-  use super::EMBEDDER_MAGIC;
+  use super::EMBEDDER_ENVELOPE_TAG;
   use super::read_embedder_envelope;
 
   #[test]
   fn reads_embedder_envelope() {
     let payload = [0xFF, 0x0F];
-    let bytes = [EMBEDDER_MAGIC.as_slice(), &[1], &payload].concat();
+    let bytes = [[EMBEDDER_ENVELOPE_TAG].as_slice(), &[1], &payload].concat();
     let (version, remaining) = read_embedder_envelope(&bytes).unwrap();
     assert_eq!(version, 1);
     assert_eq!(remaining, payload);
 
-    let bytes =
-      [EMBEDDER_MAGIC.as_slice(), &[0xAC, 0x02], &payload[..1]].concat();
+    let bytes = [
+      [EMBEDDER_ENVELOPE_TAG].as_slice(),
+      &[0xAC, 0x02],
+      &payload[..1],
+    ]
+    .concat();
     let (version, remaining) = read_embedder_envelope(&bytes).unwrap();
     assert_eq!(version, 300);
     assert_eq!(remaining, &payload[..1]);
@@ -828,9 +831,12 @@ mod tests {
   #[test]
   fn rejects_invalid_embedder_envelope() {
     assert!(read_embedder_envelope(&[]).is_err());
-    assert!(read_embedder_envelope(EMBEDDER_MAGIC).is_err());
-    let invalid_version =
-      [EMBEDDER_MAGIC.as_slice(), &[0x80, 0x80, 0x80, 0x80, 0x10]].concat();
+    assert!(read_embedder_envelope(&[EMBEDDER_ENVELOPE_TAG]).is_err());
+    let invalid_version = [
+      [EMBEDDER_ENVELOPE_TAG].as_slice(),
+      &[0x80, 0x80, 0x80, 0x80, 0x10],
+    ]
+    .concat();
     assert!(read_embedder_envelope(&invalid_version).is_err());
   }
 }
