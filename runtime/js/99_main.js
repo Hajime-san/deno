@@ -497,6 +497,12 @@ core.registerErrorBuilder(
   },
 );
 core.registerErrorBuilder(
+  "DOMExceptionDataCloneError",
+  function DOMExceptionDataCloneError(msg) {
+    return new DOMException(msg, "DataCloneError");
+  },
+);
+core.registerErrorBuilder(
   "DOMExceptionInvalidStateError",
   function DOMExceptionInvalidStateError(msg) {
     return new DOMException(msg, "InvalidStateError");
