@@ -65,33 +65,14 @@ pub enum StructuredCloneHostObjectTag {
   // settings:(ImageDataSerializationTag, value)*, End, width:uint32,
   // height:uint32, data:V8 value -> ImageData (ref)
   ImageData = b'#',
-  ImageBitmap = b'g', // tags terminated by ImageSerializationTag::kEnd (see
-  // SerializedColorParams.h), width:uint32_t,
-  // height:uint32_t, pixelDataLength:uint32_t,
-  // data:byte[pixelDataLength]
-  // -> ImageBitmap (ref)
-  // transferId:uint32 -> ImageBitmap pre-created from the matching
-  // out-of-band transfer data holder.
-  ImageBitmapTransfer = b'G',
-  // transferId:uint32 -> OffscreenCanvas pre-created from the matching
-  // out-of-band transfer data holder.
-  OffscreenCanvasTransfer = b'H',
   #[cfg(test)]
   TestTransferable = b'~',
-  // Retired tags must remain reserved as `Deprecated...` variants and must
-  // never be assigned to another host object.
 }
 
 impl StructuredCloneHostObjectTag {
   fn from_tag(tag: u8) -> Option<Self> {
     match tag {
       tag if tag == Self::ImageData as u8 => Some(Self::ImageData),
-      tag if tag == Self::ImageBitmapTransfer as u8 => {
-        Some(Self::ImageBitmapTransfer)
-      }
-      tag if tag == Self::OffscreenCanvasTransfer as u8 => {
-        Some(Self::OffscreenCanvasTransfer)
-      }
       #[cfg(test)]
       tag if tag == Self::TestTransferable as u8 => {
         Some(Self::TestTransferable)
