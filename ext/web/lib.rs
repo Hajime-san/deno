@@ -12,6 +12,7 @@ mod geometry;
 mod image_data;
 mod message_port;
 mod stream_resource;
+#[path = "structured_clone/structured_clone.rs"]
 mod structured_clone;
 mod timers;
 mod url;
