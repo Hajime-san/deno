@@ -3,10 +3,10 @@
 use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::OnceLock;
 
-use deno_core::OpState;
 use deno_core::StructuredCloneHostObjectRegistry;
-pub use deno_core::StructuredCloneHostObjectTag;
+use deno_core::StructuredCloneHostObjectTag;
 use deno_core::StructuredDeserializeWithTransferResult;
 use deno_core::op2;
 use deno_core::read_structured_clone_host_object;
@@ -57,6 +57,7 @@ enum HostObjectHandler {
     tag: StructuredCloneHostObjectTag,
     handler: SerializableHandler,
   },
+  #[allow(dead_code)] // No production Web IDL transferable is registered yet.
   Transferable {
     tag: StructuredCloneHostObjectTag,
     interface_name: &'static std::ffi::CStr,
@@ -76,8 +77,7 @@ struct RegistryInner {
   handlers_by_interface: HashMap<&'static std::ffi::CStr, HostObjectHandler>,
 }
 
-#[derive(Clone)]
-pub struct WebStructuredCloneHostObjectRegistry {
+struct WebStructuredCloneHostObjectRegistry {
   inner: Arc<RegistryInner>,
 }
 
@@ -115,7 +115,7 @@ impl WebStructuredCloneHostObjectRegistry {
     );
   }
 
-  pub fn register_serializable<T: deno_core::StructuredCloneHostObject>(
+  fn register_serializable<T: deno_core::StructuredCloneHostObject>(
     &mut self,
     tag: StructuredCloneHostObjectTag,
   ) {
@@ -128,7 +128,8 @@ impl WebStructuredCloneHostObjectRegistry {
     });
   }
 
-  pub fn register_transferable<T: deno_core::StructuredCloneTransferable>(
+  #[allow(dead_code)] // Used by the local registry in transfer tests.
+  fn register_transferable<T: deno_core::StructuredCloneTransferable>(
     &mut self,
     tag: StructuredCloneHostObjectTag,
   ) {
@@ -145,92 +146,8 @@ pub struct WebStructuredCloneTransferData {
   receive: ReceiveTransferHandler,
   data: Box<dyn Any>,
 }
-/*
-  // Runtime dispatch is keyed by Web IDL interface identity, not by the Rust
-  // type implementing that interface and not by its persistent wire tag.
-  // Hashing the fixed interface name keeps lookup independent of the number
-  // of registered host-object codecs.
-  serializable_by_interface: HashMap<
-    &'static std::ffi::CStr,
-    (StructuredCloneHostObjectTag, SerializableHandler),
-  >,
-  serializable_by_tag:
-    HashMap<StructuredCloneHostObjectTag, SerializableHandler>,
-  transferable_by_interface:
-    HashMap<&'static std::ffi::CStr, TransferableHandler>,
-  transferable_by_tag:
-    HashMap<StructuredCloneHostObjectTag, &'static std::ffi::CStr>,
-}
 
-impl WebStructuredCloneHostObjectRegistry {
-  fn new() -> Self {
-    Self {
-      serializable_by_interface: HashMap::new(),
-      serializable_by_tag: HashMap::new(),
-      transferable_by_interface: HashMap::new(),
-      transferable_by_tag: HashMap::new(),
-    }
-  }
-
-  pub fn register_serializable<T: deno_core::StructuredCloneHostObject>(
-    &mut self,
-    tag: StructuredCloneHostObjectTag,
-  ) {
-    assert!(
-      !self.transferable_by_tag.contains_key(&tag),
-      "structured clone tag registered twice"
-    );
-    let handler = SerializableHandler {
-      write: write_structured_clone_host_object::<T>,
-      read: read_structured_clone_host_object::<T>,
-    };
-    assert!(
-      self
-        .serializable_by_interface
-        .insert(T::INTERFACE_NAME, (tag, handler))
-        .is_none(),
-      "structured clone interface registered twice"
-    );
-    assert!(
-      self.serializable_by_tag.insert(tag, handler).is_none(),
-      "structured clone tag registered twice"
-    );
-  }
-
-  pub fn register_transferable<T: deno_core::StructuredCloneTransferable>(
-    &mut self,
-    tag: StructuredCloneHostObjectTag,
-  ) {
-    assert!(
-      !self.serializable_by_tag.contains_key(&tag),
-      "structured clone tag registered twice"
-    );
-    let interface_name = T::INTERFACE_NAME;
-    assert!(
-      self
-        .transferable_by_interface
-        .insert(
-          interface_name,
-          TransferableHandler {
-            tag,
-            validate: deno_core::validate_structured_clone_transferable::<T>,
-            transfer: transfer_host_object::<T>,
-          },
-        )
-        .is_none(),
-      "structured clone transferable interface registered twice"
-    );
-    assert!(
-      self
-        .transferable_by_tag
-        .insert(tag, interface_name)
-        .is_none(),
-      "structured clone tag registered twice"
-    );
-  }
-}
-*/
-
+#[allow(dead_code)] // Referenced by transferable registrations.
 fn transfer_host_object<'s, 'i, T: deno_core::StructuredCloneTransferable>(
   scope: &mut v8::PinScope<'s, 'i>,
   object: v8::Local<'s, v8::Object>,
@@ -243,6 +160,7 @@ fn transfer_host_object<'s, 'i, T: deno_core::StructuredCloneTransferable>(
   })
 }
 
+#[allow(dead_code)] // Referenced by transferable registrations.
 fn receive_host_object<'s, 'i, T: deno_core::StructuredCloneTransferable>(
   scope: &mut v8::PinScope<'s, 'i>,
   data: Box<dyn Any>,
@@ -264,6 +182,21 @@ impl Default for WebStructuredCloneHostObjectRegistry {
     );
     registry
   }
+}
+
+// This registry is process-global and immutable after its first use. It holds
+// only the fixed set of host objects supplied by deno_web. Unlike Blink's
+// runtime if/else interface checks, the interface hash table and tag array
+// provide average O(1) dispatch at the cost of keeping those tables allocated
+// for the lifetime of the Deno process.
+static WEB_STRUCTURED_CLONE_HOST_OBJECT_REGISTRY: OnceLock<
+  WebStructuredCloneHostObjectRegistry,
+> = OnceLock::new();
+
+fn web_structured_clone_host_object_registry()
+-> &'static WebStructuredCloneHostObjectRegistry {
+  WEB_STRUCTURED_CLONE_HOST_OBJECT_REGISTRY
+    .get_or_init(WebStructuredCloneHostObjectRegistry::default)
 }
 
 fn host_object_interface_name(
@@ -425,7 +358,6 @@ impl StructuredCloneHostObjectRegistry
 // https://html.spec.whatwg.org/multipage/structured-data.html#dom-structuredclone
 #[op2]
 pub fn structured_clone<'s, 'i>(
-  state: &mut OpState,
   scope: &mut v8::PinScope<'s, 'i>,
   value: v8::Local<'s, v8::Value>,
   options: Option<v8::Local<'s, v8::Value>>,
@@ -434,11 +366,7 @@ pub fn structured_clone<'s, 'i>(
   // getting current realm should call inside of
   // StructuredSerialize/StructuredDeserialize
   let context = scope.get_current_context();
-  // Serialization can invoke user code, so do not keep OpState borrowed while
-  // V8 walks the graph.
-  let registry = state
-    .borrow::<WebStructuredCloneHostObjectRegistry>()
-    .clone();
+  let registry = web_structured_clone_host_object_registry();
   let options = deno_core::StructuredSerializeOptions::convert(scope, options)
     .map_err(JsErrorBox::from_err)?;
 
@@ -461,12 +389,10 @@ pub fn structured_clone<'s, 'i>(
     context,
     value,
     &options.transfer,
-    &registry,
+    registry,
   )?;
   let StructuredDeserializeWithTransferResult { deserialized, .. } =
-    structured_deserialize_with_transfer(
-      scope, serialized, context, &registry,
-    )?;
+    structured_deserialize_with_transfer(scope, serialized, context, registry)?;
 
   Ok(deserialized)
 }
