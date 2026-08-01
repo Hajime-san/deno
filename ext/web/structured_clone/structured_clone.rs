@@ -366,7 +366,7 @@ pub fn structured_clone<'s, 'i>(
   let options = deno_core::StructuredSerializeOptions::convert(scope, options)
     .map_err(JsErrorBox::from_err)?;
 
-  // Primitives have no identity to reconstruct. Keep this optimization at the
+  // Specific primitives have no identity to reconstruct. Keep this optimization at the
   // API boundary: a non-empty transfer list must still be validated and
   // processed even when the cloned value itself is a primitive.
   if options.transfer.is_empty()
