@@ -81,6 +81,7 @@ pub enum StructuredCloneHostObjectTag {
   ImageData = b'#',
   // Test-only host object used by structured-clone tests. Keep its wire value
   // reserved even though the implementation is not part of the Web API.
+  #[cfg(test)]
   TestTransferable = b'~',
 }
 
@@ -88,6 +89,7 @@ impl StructuredCloneHostObjectTag {
   pub fn from_tag(tag: u8) -> Option<Self> {
     match tag {
       tag if tag == Self::ImageData as u8 => Some(Self::ImageData),
+      #[cfg(test)]
       tag if tag == Self::TestTransferable as u8 => {
         Some(Self::TestTransferable)
       }
