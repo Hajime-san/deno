@@ -414,6 +414,26 @@ pub fn op_native_structured_clone<'s, 'i>(
 }
 
 #[cfg(test)]
+fn register_data_clone_error_builder(runtime: &mut deno_core::JsRuntime) {
+  runtime
+    .execute_script(
+      "structured_clone_error_builder.js",
+      r#"
+        (() => {
+          const { DOMException } = Deno.core.loadExtScript(
+            "ext:deno_web/01_dom_exception.js",
+          );
+          Deno.core.registerErrorBuilder(
+            "DOMExceptionDataCloneError",
+            (message) => new DOMException(message, "DataCloneError"),
+          );
+        })();
+      "#,
+    )
+    .unwrap();
+}
+
+#[cfg(test)]
 #[path = "tests/wire_format_backward_compatibility.rs"]
 mod wire_format_backward_compatibility;
 
@@ -425,7 +445,7 @@ mod array_buffer {
   use deno_core::RuntimeOptions;
 
   fn runtime() -> JsRuntime {
-    JsRuntime::new(RuntimeOptions {
+    let mut runtime = JsRuntime::new(RuntimeOptions {
       extensions: vec![
         deno_webidl::deno_webidl::init(),
         crate::deno_web::init(
@@ -437,7 +457,9 @@ mod array_buffer {
         ),
       ],
       ..Default::default()
-    })
+    });
+    super::register_data_clone_error_builder(&mut runtime);
+    runtime
   }
 
   #[test]
@@ -481,6 +503,9 @@ mod array_buffer {
         .execute_script(
           "structured_clone_transfer_validation.js",
           r#"
+            const { DOMException } = Deno.core.loadExtScript(
+              "ext:deno_web/01_dom_exception.js",
+            );
             const { structuredClone } = Deno.core.loadExtScript(
               "ext:deno_web/02_native_structured_clone.js",
             );
@@ -488,7 +513,10 @@ mod array_buffer {
             let duplicateThrew = false;
             try {
               structuredClone(null, { transfer: [duplicate, duplicate] });
-            } catch {
+            } catch (error) {
+              if (!(error instanceof DOMException) || error.name !== "DataCloneError") {
+                throw error;
+              }
               duplicateThrew = true;
             }
             if (!duplicateThrew) throw new Error("duplicate transfer did not throw");
@@ -529,7 +557,7 @@ mod options {
   use deno_core::RuntimeOptions;
 
   fn runtime() -> JsRuntime {
-    JsRuntime::new(RuntimeOptions {
+    let mut runtime = JsRuntime::new(RuntimeOptions {
       extensions: vec![
         deno_webidl::deno_webidl::init(),
         crate::deno_web::init(
@@ -541,7 +569,9 @@ mod options {
         ),
       ],
       ..Default::default()
-    })
+    });
+    super::register_data_clone_error_builder(&mut runtime);
+    runtime
   }
 
   #[test]
@@ -584,7 +614,7 @@ mod serialization {
   use deno_core::RuntimeOptions;
 
   fn runtime() -> JsRuntime {
-    JsRuntime::new(RuntimeOptions {
+    let mut runtime = JsRuntime::new(RuntimeOptions {
       extensions: vec![
         deno_webidl::deno_webidl::init(),
         crate::deno_web::init(
@@ -596,7 +626,9 @@ mod serialization {
         ),
       ],
       ..Default::default()
-    })
+    });
+    super::register_data_clone_error_builder(&mut runtime);
+    runtime
   }
 
   use deno_core::v8;
@@ -762,7 +794,7 @@ mod host_object_transfer {
   const TEST_TRANSFERABLE_TAG: u8 = b'~';
 
   fn runtime() -> JsRuntime {
-    JsRuntime::new(RuntimeOptions {
+    let mut runtime = JsRuntime::new(RuntimeOptions {
       extensions: vec![
         deno_webidl::deno_webidl::init(),
         crate::deno_web::init(
@@ -774,7 +806,9 @@ mod host_object_transfer {
         ),
       ],
       ..Default::default()
-    })
+    });
+    super::register_data_clone_error_builder(&mut runtime);
+    runtime
   }
 
   #[test]
