@@ -16,15 +16,6 @@ use crate::runtime::SnapshotStoreDataStore;
 
 const CPPGC_SINGLE_TAG: u16 = 1;
 
-// TODO: JS host object identity should not depend on Rust's TypeId. Replace
-// this with a Blink-style generated descriptor (ScriptWrappable /
-// WrapperTypeInfo), or at minimum a stable Web IDL interface name, once typed
-// unwrap and inheritance checks can use that descriptor safely. For now, the
-// wrapper keeps TypeId as its sole runtime type identity.
-//
-// https://source.chromium.org/chromium/chromium/src/+/main:third_party/blink/renderer/bindings/core/v8/serialization/v8_script_value_serializer.cc
-// https://source.chromium.org/chromium/chromium/src/+/main:third_party/blink/renderer/platform/bindings/script_wrappable.h
-// https://source.chromium.org/chromium/chromium/src/+/main:third_party/blink/renderer/platform/bindings/wrapper_type_info.h
 #[repr(C)]
 struct CppGcObject<T: GarbageCollected> {
   tag: TypeId,

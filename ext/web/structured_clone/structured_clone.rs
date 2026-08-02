@@ -82,7 +82,19 @@ struct RegistryInner {
   // Tags are one-byte wire values, so an array avoids hashing and stores each
   // registered handler exactly once for deserialization.
   handlers_by_tag: [Option<HostObjectHandler>; TAG_COUNT],
-  // Concrete CppGC types are identified by the TypeId stored in their wrapper.
+  // TODO: JS host object dispatch should not depend on Rust's TypeId. Replace
+  // this with Blink-style generated descriptors (ScriptWrappable /
+  // WrapperTypeInfo), or at minimum stable Web IDL interface names, once Deno
+  // has a descriptor-based typed unwrap and inheritance model.
+  //
+  // Concrete CppGC types are currently identified by the TypeId stored in
+  // their wrapper.
+  // `CppGcObject` stores the concrete Rust type identity used by typed unwrap
+  // and inheritance checks.
+  //
+  // https://source.chromium.org/chromium/chromium/src/+/main:third_party/blink/renderer/bindings/core/v8/serialization/v8_script_value_serializer.cc
+  // https://source.chromium.org/chromium/chromium/src/+/main:third_party/blink/renderer/platform/bindings/script_wrappable.h
+  // https://source.chromium.org/chromium/chromium/src/+/main:third_party/blink/renderer/platform/bindings/wrapper_type_info.h
   handlers_by_type: HashMap<TypeId, HostObjectHandler>,
 }
 
