@@ -433,6 +433,15 @@ mod array_buffer {
             const { structuredClone } = Deno.core.loadExtScript(
               "ext:deno_web/02_structured_clone.js",
             );
+            const fastSource = new ArrayBuffer(4);
+            new Uint8Array(fastSource).set([5, 6, 7, 8]);
+            const fastClone = structuredClone(fastSource);
+            if (fastClone === fastSource || fastSource.byteLength !== 4) {
+              throw new Error("ArrayBuffer fast path did not clone");
+            }
+            if (new Uint8Array(fastClone).join(",") !== "5,6,7,8") {
+              throw new Error("ArrayBuffer fast path has invalid data");
+            }
             const source = new ArrayBuffer(4);
             const sourceView = new Uint8Array(source);
             sourceView.set([1, 2, 3, 4]);
