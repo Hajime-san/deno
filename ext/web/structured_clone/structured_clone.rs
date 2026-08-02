@@ -3,14 +3,19 @@
 use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
+#[cfg(test)]
 use std::sync::OnceLock;
 
 use deno_core::StructuredCloneHostObjectRegistry;
 use deno_core::StructuredCloneHostObjectTag;
+#[cfg(test)]
 use deno_core::StructuredDeserializeWithTransferResult;
+#[cfg(test)]
 use deno_core::op2;
 use deno_core::read_structured_clone_host_object;
+#[cfg(test)]
 use deno_core::structured_deserialize_with_transfer;
+#[cfg(test)]
 use deno_core::structured_serialize_with_transfer;
 use deno_core::v8;
 use deno_core::write_structured_clone_host_object;
@@ -189,10 +194,12 @@ impl Default for WebStructuredCloneHostObjectRegistry {
 // runtime if/else interface checks, the interface hash table and tag array
 // provide average O(1) dispatch at the cost of keeping those tables allocated
 // for the lifetime of the Deno process.
+#[cfg(test)]
 static WEB_STRUCTURED_CLONE_HOST_OBJECT_REGISTRY: OnceLock<
   WebStructuredCloneHostObjectRegistry,
 > = OnceLock::new();
 
+#[cfg(test)]
 fn web_structured_clone_host_object_registry()
 -> &'static WebStructuredCloneHostObjectRegistry {
   WEB_STRUCTURED_CLONE_HOST_OBJECT_REGISTRY
@@ -355,8 +362,9 @@ impl StructuredCloneHostObjectRegistry
 }
 
 // https://html.spec.whatwg.org/multipage/structured-data.html#dom-structuredclone
+#[cfg(test)]
 #[op2]
-pub fn structured_clone<'s, 'i>(
+pub fn op_native_structured_clone<'s, 'i>(
   scope: &mut v8::PinScope<'s, 'i>,
   value: v8::Local<'s, v8::Value>,
   options: Option<v8::Local<'s, v8::Value>>,
@@ -431,7 +439,7 @@ mod array_buffer {
           "structured_clone_array_buffer_transfer.js",
           r#"
             const { structuredClone } = Deno.core.loadExtScript(
-              "ext:deno_web/02_structured_clone.js",
+              "ext:deno_web/02_native_structured_clone.js",
             );
             const fastSource = new ArrayBuffer(4);
             new Uint8Array(fastSource).set([5, 6, 7, 8]);
@@ -465,7 +473,7 @@ mod array_buffer {
           "structured_clone_transfer_validation.js",
           r#"
             const { structuredClone } = Deno.core.loadExtScript(
-              "ext:deno_web/02_structured_clone.js",
+              "ext:deno_web/02_native_structured_clone.js",
             );
             const duplicate = new ArrayBuffer(4);
             let duplicateThrew = false;
@@ -535,7 +543,7 @@ mod options {
           "structured_clone_options_conversion.js",
           r#"
             const { structuredClone } = Deno.core.loadExtScript(
-              "ext:deno_web/02_structured_clone.js",
+              "ext:deno_web/02_native_structured_clone.js",
             );
             let getterCalled = false;
             const options = {
@@ -616,7 +624,7 @@ mod serialization {
             "ext:deno_web/16_image_data.js",
           );
           const { structuredClone } = Deno.core.loadExtScript(
-            "ext:deno_web/02_structured_clone.js",
+            "ext:deno_web/02_native_structured_clone.js",
           );
 
           const original = new ImageData(2, 1, {
@@ -652,7 +660,7 @@ mod serialization {
             "ext:deno_web/16_image_data.js",
           );
           const { structuredClone } = Deno.core.loadExtScript(
-            "ext:deno_web/02_structured_clone.js",
+            "ext:deno_web/02_native_structured_clone.js",
           );
 
           const original = new ImageData(1, 1, {

@@ -76,9 +76,10 @@ pub const STRUCTURED_CLONE_WIRE_FORMAT_VERSION: u32 = 1;
 #[derive(Clone, Copy, Eq, Hash, PartialEq)]
 #[repr(u8)]
 pub enum StructuredCloneHostObjectTag {
-  // settings:(ImageDataSerializationTag, value)*, End, width:uint32,
-  // height:uint32, data:V8 value -> ImageData
-  ImageData = b'#',
+  ImageData = b'#', // settings:(ImageDataSerializationTag, value)*, End,
+                    // width:u32,
+                    // height:u32,
+                    // data:V8 value -> ImageData
 }
 
 // V8's WriteUint32 uses a base-128 varint: each byte contributes seven value

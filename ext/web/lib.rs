@@ -149,7 +149,6 @@ deno_core::extension!(deno_web,
     broadcast_channel::op_broadcast_free,
     broadcast_channel::op_broadcast_send,
     broadcast_channel::op_broadcast_recv,
-    structured_clone::structured_clone,
   ],
   objects = [
     css_stylesheet::CSSRule,
@@ -209,6 +208,20 @@ deno_core::extension!(deno_web,
     state.put(geometry::State::new(options.enable_css_parser_features));
     state.put(options.bc);
     state.put(broadcast_channel::BroadcastSabStash::default());
+  },
+  customizer = |ext: &mut deno_core::Extension| {
+    #[cfg(test)]
+    {
+      ext.ops
+        .to_mut()
+        .push(structured_clone::op_native_structured_clone());
+      ext.lazy_loaded_js_files.to_mut().extend(
+        deno_core::include_lazy_loaded_js_files!(
+          deno_web
+          "02_native_structured_clone.js",
+        ),
+      );
+    }
   }
 );
 
