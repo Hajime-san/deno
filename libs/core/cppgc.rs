@@ -16,9 +16,11 @@ use crate::runtime::SnapshotStoreDataStore;
 
 const CPPGC_SINGLE_TAG: u16 = 1;
 
-// A future name-based descriptor could model Blink's ScriptWrappable and
-// WrapperTypeInfo dispatch. For now, the wrapper keeps TypeId as its sole
-// runtime type identity; typed unwrap and inheritance checks depend on it.
+// TODO: JS host object identity should not depend on Rust's TypeId. Replace
+// this with a Blink-style generated descriptor (ScriptWrappable /
+// WrapperTypeInfo), or at minimum a stable Web IDL interface name, once typed
+// unwrap and inheritance checks can use that descriptor safely. For now, the
+// wrapper keeps TypeId as its sole runtime type identity.
 //
 // https://source.chromium.org/chromium/chromium/src/+/main:third_party/blink/renderer/bindings/core/v8/serialization/v8_script_value_serializer.cc
 // https://source.chromium.org/chromium/chromium/src/+/main:third_party/blink/renderer/platform/bindings/script_wrappable.h
