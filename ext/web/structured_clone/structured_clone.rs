@@ -54,12 +54,12 @@ struct SerializableHandler {
 #[derive(Clone, Copy)]
 enum HostObjectHandler {
   Serializable {
-    tag: StructuredCloneHostObjectTag,
+    tag: u8,
     handler: SerializableHandler,
   },
   #[allow(dead_code)] // No production Web IDL transferable is registered yet.
   Transferable {
-    tag: StructuredCloneHostObjectTag,
+    tag: u8,
     interface_name: &'static std::ffi::CStr,
     validate: ValidateTransferHandler,
     transfer: TransferHandler,
@@ -117,7 +117,7 @@ impl WebStructuredCloneHostObjectRegistry {
 
   fn register_serializable<T: deno_core::StructuredCloneHostObject>(
     &mut self,
-    tag: StructuredCloneHostObjectTag,
+    tag: u8,
   ) {
     self.register_handler::<T>(HostObjectHandler::Serializable {
       tag,
@@ -131,7 +131,7 @@ impl WebStructuredCloneHostObjectRegistry {
   #[allow(dead_code)] // Used by the local registry in transfer tests.
   fn register_transferable<T: deno_core::StructuredCloneTransferable>(
     &mut self,
-    tag: StructuredCloneHostObjectTag,
+    tag: u8,
   ) {
     self.register_handler::<T>(HostObjectHandler::Transferable {
       tag,
@@ -178,7 +178,7 @@ impl Default for WebStructuredCloneHostObjectRegistry {
   fn default() -> Self {
     let mut registry = WebStructuredCloneHostObjectRegistry::new();
     registry.register_serializable::<ImageData>(
-      StructuredCloneHostObjectTag::ImageData,
+      StructuredCloneHostObjectTag::ImageData as u8,
     );
     registry
   }
@@ -244,7 +244,7 @@ impl StructuredCloneHostObjectRegistry
       else {
         return None;
       };
-      serializer.write_raw_bytes(&[*tag as u8]);
+      serializer.write_raw_bytes(&[*tag]);
       serializer.write_uint32(transfer_id);
       return Some(true);
     }
@@ -254,7 +254,7 @@ impl StructuredCloneHostObjectRegistry
     else {
       return None;
     };
-    serializer.write_raw_bytes(&[*tag as u8]);
+    serializer.write_raw_bytes(&[*tag]);
     (handler.write)(scope, context, object, serializer)
   }
 
@@ -267,7 +267,6 @@ impl StructuredCloneHostObjectRegistry
     transferred_host_objects: &[v8::Global<v8::Object>],
   ) -> Option<v8::Local<'s, v8::Object>> {
     let tag = *deserializer.read_raw_bytes(1)?.first()?;
-    let tag = StructuredCloneHostObjectTag::from_tag(tag)?;
     // Validate that the transferred object has the interface associated with
     // the serialized tag. TODO: add Blink's additional
     // ExecutionContextExposesInterface-equivalent check once Deno exposes
@@ -735,9 +734,10 @@ mod host_object_transfer {
   use deno_core::RuntimeOptions;
   use deno_core::v8;
 
-  use super::StructuredCloneHostObjectTag;
   use super::WebStructuredCloneHostObjectRegistry;
   use super::test_transferable::TestTransferable;
+
+  const TEST_TRANSFERABLE_TAG: u8 = b'~';
 
   fn runtime() -> JsRuntime {
     JsRuntime::new(RuntimeOptions {
@@ -761,9 +761,7 @@ mod host_object_transfer {
     deno_core::scope!(scope, runtime);
     let context = scope.get_current_context();
     let mut registry = WebStructuredCloneHostObjectRegistry::new();
-    registry.register_transferable::<TestTransferable>(
-      StructuredCloneHostObjectTag::ImageData,
-    );
+    registry.register_transferable::<TestTransferable>(TEST_TRANSFERABLE_TAG);
     let first_source = deno_core::cppgc::make_cppgc_object(
       scope,
       TestTransferable {
