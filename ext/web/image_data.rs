@@ -134,12 +134,49 @@ pub struct ImageData {
   data: v8::TracedReference<v8::Object>,
 }
 
-// ImageData begins with a variable settings sequence. Each setting is encoded
-// as a uint32(varint) subtag followed by its uint32(varint) value. End has no
-// value and terminates the sequence. The fixed width, height, and V8-serialized
-// typed array follow it. Missing settings use the Web API defaults, allowing
-// new optional settings to be appended without changing the fixed payload.
-// Subtag values are permanent and must remain reserved after retirement.
+/// `ImageData` begins with a variable settings sequence. Each setting is
+/// encoded as a uint32(varint) `(subtag, value)` pair and terminated by `End`.
+/// The fixed width, height, and V8-serialized typed array follow it. Missing
+/// settings use the Web API defaults, allowing new optional settings to be
+/// appended without changing the fixed payload. Subtag values are permanent
+/// and must remain reserved after retirement.
+///
+/// # Adding a setting
+///
+/// Allocate a new, previously unused subtag and write its value before `End`.
+/// For example, a hypothetical `premultiplied_alpha` setting would use a new
+/// subtag and encode its boolean value as `0` or `1`:
+///
+/// ```ignore
+/// // Add to ImageDataSerializationTag. Never reuse a retired value.
+/// PremultipliedAlpha = 3,
+///
+/// // Write the setting before End.
+/// serializer.write_uint32(
+///   ImageDataSerializationTag::PremultipliedAlpha as u32,
+/// );
+/// serializer.write_uint32(u32::from(self.premultiplied_alpha));
+/// ```
+///
+/// The deserializer must initialize the new setting to its legacy default and
+/// handle the new subtag. This keeps payloads written before the setting was
+/// introduced compatible:
+///
+/// ```ignore
+/// let mut premultiplied_alpha = false; // Legacy default.
+///
+/// ImageDataSerializationTag::PremultipliedAlpha => {
+///   let mut value = 0;
+///   if !deserializer.read_uint32(&mut value) {
+///     return None;
+///   }
+///   premultiplied_alpha = match value {
+///     0 => false,
+///     1 => true,
+///     _ => return None,
+///   };
+/// }
+/// ```
 #[derive(Clone, Copy)]
 #[repr(u32)]
 enum ImageDataSerializationTag {
@@ -230,6 +267,7 @@ impl StructuredCloneHostObject for ImageData {
       ImageDataPixelFormat::RgbaUnorm8 => data.is_uint8_clamped_array(),
       ImageDataPixelFormat::RgbaFloat16 => data.is_float16_array(),
     };
+    // ImageData acceps only multiple of 4 by IndexSizeError above
     let expected_length = (width as usize)
       .checked_mul(height as usize)?
       .checked_mul(4)?;
