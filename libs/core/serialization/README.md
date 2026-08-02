@@ -1,8 +1,8 @@
 # Serialization
 
 This directory implements Deno's structured-clone envelope around V8's value
-serializer. Data produced here can be persisted by embedders, so its wire
-format is a compatibility contract.
+serializer. Data produced here can be persisted by embedders, so its wire format
+is a compatibility contract.
 
 The envelope is `0xFE | Deno version:uint32(varint) | V8 header | V8 payload`.
 The `0xFE` marker is consumed by Deno before constructing the V8 deserializer.
@@ -11,11 +11,11 @@ The `0xFE` marker is consumed by Deno before constructing the V8 deserializer.
 
 There are three independent identifiers:
 
-| Identifier | Owner | Purpose |
-| --- | --- | --- |
-| `STRUCTURED_CLONE_WIRE_FORMAT_VERSION` | Deno | The `0xFE` envelope, host-object tags, and Deno host-object payload schemas. |
-| V8 serializer header version | V8 | The format for ECMAScript built-ins and nested V8 values. |
-| `StructuredCloneHostObjectTag` discriminant | Deno | A permanent identifier for one host-object type. |
+| Identifier                                  | Owner | Purpose                                                                      |
+| ------------------------------------------- | ----- | ---------------------------------------------------------------------------- |
+| `STRUCTURED_CLONE_WIRE_FORMAT_VERSION`      | Deno  | The `0xFE` envelope, host-object tags, and Deno host-object payload schemas. |
+| V8 serializer header version                | V8    | The format for ECMAScript built-ins and nested V8 values.                    |
+| `StructuredCloneHostObjectTag` discriminant | Deno  | A permanent identifier for one host-object type.                             |
 
 V8's serializer format is implemented by V8; see
 [`value-serializer.cc`](https://source.chromium.org/chromium/chromium/src/+/main:v8/src/objects/value-serializer.cc).
@@ -29,8 +29,8 @@ Retired values remain reserved.
 
 For example, `ImageData` writes a Deno-defined payload after its
 `StructuredCloneHostObjectTag::ImageData` byte. Increment the Deno wire version
-when changing an existing tag's payload would make a current decoder interpret
-a valid older payload differently. Then do all of the following:
+when changing an existing tag's payload would make a current decoder interpret a
+valid older payload differently. Then do all of the following:
 
 1. Increment `STRUCTURED_CLONE_WIRE_FORMAT_VERSION`.
 2. Add a decoder branch for the previous version in the host object's
@@ -51,8 +51,8 @@ Optional host-object fields should use a self-describing encoding with defaults
 for absent fields, as `ImageData` does with its settings subtags. This lets new
 runtimes read older payloads. Adding a new host-object tag, or appending a new
 self-describing optional field, does not by itself require a Deno wire-version
-bump: no valid older payload contains that new tag. Older runtimes need not
-read values newly written with it. Unknown subtags must not be silently accepted
+bump: no valid older payload contains that new tag. Older runtimes need not read
+values newly written with it. Unknown subtags must not be silently accepted
 unless their full encoded shape can be safely skipped.
 
 ## Updating V8
