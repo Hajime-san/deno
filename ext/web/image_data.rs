@@ -293,7 +293,7 @@ unsafe impl GarbageCollected for ImageData {
   }
 
   fn get_name(&self) -> &'static std::ffi::CStr {
-    <Self as deno_core::WebIdlInterface>::INTERFACE_NAME
+    c"ImageData"
   }
 }
 

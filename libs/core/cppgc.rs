@@ -16,42 +16,17 @@ use crate::runtime::SnapshotStoreDataStore;
 
 const CPPGC_SINGLE_TAG: u16 = 1;
 
-// rusty_v8 supports CppGC values with alignment up to 16. Fixing the wrapper
-// to that alignment also lets `CppGcObjectHeader` inspect every instantiation
-// through V8's typed unwrap API without changing the value offset.
-#[repr(C, align(16))]
-struct CppGcObject<T: GarbageCollected> {
-  header: CppGcObjectHeader,
-  member: T,
-}
-
-// `CppGcObject<T>` is `repr(C)` and always starts with this header. This lets
-// runtime dispatch inspect metadata before it knows `T`.
-//
-// The name-based dispatch is inspired by Blink's ScriptWrappable and
-// WrapperTypeInfo. Blink's TypeDispatcher consults WrapperTypeInfo to apply
-// IDL inheritance rules before casting to the native C++ implementation type.
-// Deno does not have Blink's generated descriptors or CppHeapPointerTag ranges,
-// so it stores an explicitly supplied CppGC name in this common header as a
-// simplified, process-local interface descriptor for registry dispatch. This
-// lets that dispatch avoid depending on Rust TypeId, but does not replace typed
-// unwrap's concrete-type safety check. The name must never be serialized.
+// A future name-based descriptor could model Blink's ScriptWrappable and
+// WrapperTypeInfo dispatch. For now, the wrapper keeps TypeId as its sole
+// runtime type identity; typed unwrap and inheritance checks depend on it.
 //
 // https://source.chromium.org/chromium/chromium/src/+/main:third_party/blink/renderer/bindings/core/v8/serialization/v8_script_value_serializer.cc
 // https://source.chromium.org/chromium/chromium/src/+/main:third_party/blink/renderer/platform/bindings/script_wrappable.h
 // https://source.chromium.org/chromium/chromium/src/+/main:third_party/blink/renderer/platform/bindings/wrapper_type_info.h
-#[repr(C, align(16))]
-struct CppGcObjectHeader {
+#[repr(C)]
+struct CppGcObject<T: GarbageCollected> {
   tag: TypeId,
-  name: &'static std::ffi::CStr,
-}
-
-unsafe impl GarbageCollected for CppGcObjectHeader {
-  fn trace(&self, _visitor: &mut v8::cppgc::Visitor) {}
-
-  fn get_name(&self) -> &'static std::ffi::CStr {
-    c"CppGcObjectHeader"
-  }
+  member: T,
 }
 
 unsafe impl<T: GarbageCollected> v8::cppgc::GarbageCollected
@@ -116,15 +91,11 @@ pub fn wrap_object<'a, T: GarbageCollected + 'static>(
   t: T,
 ) -> v8::Local<'a, v8::Object> {
   let heap = isolate.get_cpp_heap().unwrap();
-  let name = t.get_name();
   unsafe {
     let member = v8::cppgc::make_garbage_collected(
       heap,
       CppGcObject {
-        header: CppGcObjectHeader {
-          tag: TypeId::of::<T>(),
-          name,
-        },
+        tag: TypeId::of::<T>(),
         member: t,
       },
     );
@@ -194,7 +165,7 @@ fn try_unwrap_cppgc_with<'sc, T: GarbageCollected + 'static>(
     v8::Object::unwrap::<CPPGC_SINGLE_TAG, CppGcObject<T>>(isolate, obj)
   }?;
 
-  let tag = unsafe { obj.as_ref() }.header.tag;
+  let tag = unsafe { obj.as_ref() }.tag;
   if tag != TypeId::of::<T>() && !inheriting.contains(&tag) {
     return None;
   }
@@ -215,29 +186,6 @@ pub fn try_unwrap_cppgc_object<'sc, T: GarbageCollected + 'static>(
   val: v8::Local<'sc, v8::Value>,
 ) -> Option<UnsafePtr<T>> {
   try_unwrap_cppgc_with::<T>(isolate, val, &[])
-}
-
-/// Returns the explicit name stored in a CppGC API wrapper.
-///
-/// Web IDL bindings use this name as process-local interface identity for
-/// runtime dispatch. It is not a structured-clone wire tag and must not be
-/// persisted. Types participating in Web IDL dispatch must use their Web IDL
-/// interface name as their `GarbageCollected::get_name()` result.
-pub fn try_get_cppgc_name<'sc>(
-  isolate: &mut v8::Isolate,
-  val: v8::Local<'sc, v8::Value>,
-) -> Option<&'static std::ffi::CStr> {
-  let object = val.try_cast::<v8::Object>().ok()?;
-  if !object.is_api_wrapper() {
-    return None;
-  }
-
-  // SAFETY: Every object wrapped by this module contains a repr(C)
-  // `CppGcObject<T>`, whose first field is `CppGcObjectHeader`.
-  let object = unsafe {
-    v8::Object::unwrap::<CPPGC_SINGLE_TAG, CppGcObjectHeader>(isolate, object)
-  }?;
-  Some(unsafe { object.as_ref() }.name)
 }
 
 #[doc(hidden)]

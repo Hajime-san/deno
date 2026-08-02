@@ -1,6 +1,7 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
 use std::any::Any;
+use std::any::TypeId;
 use std::collections::HashMap;
 use std::sync::Arc;
 #[cfg(test)]
@@ -49,9 +50,12 @@ type ReceiveTransferHandler =
     &mut v8::PinScope<'s, 'i>,
     Box<dyn Any>,
   ) -> Result<v8::Local<'s, v8::Object>, JsErrorBox>;
+type TypeMatchHandler =
+  for<'s> fn(&mut v8::Isolate, v8::Local<'s, v8::Object>) -> bool;
 
 #[derive(Clone, Copy)]
 struct SerializableHandler {
+  matches: TypeMatchHandler,
   write: WriteHandler,
   read: ReadHandler,
 }
@@ -65,7 +69,7 @@ enum HostObjectHandler {
   #[allow(dead_code)] // No production Web IDL transferable is registered yet.
   Transferable {
     tag: u8,
-    interface_name: &'static std::ffi::CStr,
+    matches: TypeMatchHandler,
     validate: ValidateTransferHandler,
     transfer: TransferHandler,
   },
@@ -78,8 +82,8 @@ struct RegistryInner {
   // Tags are one-byte wire values, so an array avoids hashing and stores each
   // registered handler exactly once for deserialization.
   handlers_by_tag: [Option<HostObjectHandler>; TAG_COUNT],
-  // Interface names are the Web IDL identity stored in every CppGC wrapper.
-  handlers_by_interface: HashMap<&'static std::ffi::CStr, HostObjectHandler>,
+  // Concrete CppGC types are identified by the TypeId stored in their wrapper.
+  handlers_by_type: HashMap<TypeId, HostObjectHandler>,
 }
 
 struct WebStructuredCloneHostObjectRegistry {
@@ -91,15 +95,12 @@ impl WebStructuredCloneHostObjectRegistry {
     Self {
       inner: Arc::new(RegistryInner {
         handlers_by_tag: [None; TAG_COUNT],
-        handlers_by_interface: HashMap::new(),
+        handlers_by_type: HashMap::new(),
       }),
     }
   }
 
-  fn register_handler<T: deno_core::WebIdlInterface + 'static>(
-    &mut self,
-    handler: HostObjectHandler,
-  ) {
+  fn register_handler<T: 'static>(&mut self, handler: HostObjectHandler) {
     let inner = Arc::make_mut(&mut self.inner);
     let tag = match handler {
       HostObjectHandler::Serializable { tag, .. }
@@ -107,10 +108,10 @@ impl WebStructuredCloneHostObjectRegistry {
     };
     assert!(
       inner
-        .handlers_by_interface
-        .insert(T::INTERFACE_NAME, handler)
+        .handlers_by_type
+        .insert(TypeId::of::<T>(), handler)
         .is_none(),
-      "structured clone interface registered twice"
+      "structured clone type registered twice"
     );
     assert!(
       inner.handlers_by_tag[tag as usize]
@@ -127,6 +128,7 @@ impl WebStructuredCloneHostObjectRegistry {
     self.register_handler::<T>(HostObjectHandler::Serializable {
       tag,
       handler: SerializableHandler {
+        matches: type_matches::<T>,
         write: write_structured_clone_host_object::<T>,
         read: read_structured_clone_host_object::<T>,
       },
@@ -140,7 +142,7 @@ impl WebStructuredCloneHostObjectRegistry {
   ) {
     self.register_handler::<T>(HostObjectHandler::Transferable {
       tag,
-      interface_name: T::INTERFACE_NAME,
+      matches: type_matches::<T>,
       validate: deno_core::validate_structured_clone_transferable::<T>,
       transfer: transfer_host_object::<T>,
     });
@@ -190,10 +192,9 @@ impl Default for WebStructuredCloneHostObjectRegistry {
 }
 
 // This registry is process-global and immutable after its first use. It holds
-// only the fixed set of host objects supplied by deno_web. Unlike Blink's
-// runtime if/else interface checks, the interface hash table and tag array
-// provide average O(1) dispatch at the cost of keeping those tables allocated
-// for the lifetime of the Deno process.
+// only the fixed set of host objects supplied by deno_web. The type map and
+// tag array provide average O(1) handler lookup at the cost of keeping those
+// tables allocated for the lifetime of the Deno process.
 #[cfg(test)]
 static WEB_STRUCTURED_CLONE_HOST_OBJECT_REGISTRY: OnceLock<
   WebStructuredCloneHostObjectRegistry,
@@ -206,11 +207,29 @@ fn web_structured_clone_host_object_registry()
     .get_or_init(WebStructuredCloneHostObjectRegistry::default)
 }
 
-fn host_object_interface_name(
+fn type_matches<T: deno_core::GarbageCollected + 'static>(
   scope: &mut v8::Isolate,
   object: v8::Local<v8::Object>,
-) -> Option<&'static std::ffi::CStr> {
-  deno_core::cppgc::try_get_cppgc_name(scope, object.into())
+) -> bool {
+  deno_core::cppgc::try_unwrap_cppgc_object::<T>(scope, object.into()).is_some()
+}
+
+fn host_object_type_id(
+  registry: &WebStructuredCloneHostObjectRegistry,
+  scope: &mut v8::Isolate,
+  object: v8::Local<v8::Object>,
+) -> Option<TypeId> {
+  registry
+    .inner
+    .handlers_by_type
+    .iter()
+    .find_map(|(type_id, handler)| {
+      let matches = match handler {
+        HostObjectHandler::Serializable { handler, .. } => handler.matches,
+        HostObjectHandler::Transferable { matches, .. } => *matches,
+      };
+      matches(scope, object).then_some(*type_id)
+    })
 }
 
 impl StructuredCloneHostObjectRegistry
@@ -227,13 +246,10 @@ impl StructuredCloneHostObjectRegistry
     scope: &mut v8::PinScope<'s, 'i>,
     object: v8::Local<'s, v8::Object>,
   ) -> bool {
-    let Some(interface_name) = host_object_interface_name(scope, object) else {
+    let Some(type_id) = host_object_type_id(self, scope, object) else {
       return false;
     };
-    self
-      .inner
-      .handlers_by_interface
-      .contains_key(interface_name)
+    self.inner.handlers_by_type.contains_key(&type_id)
   }
 
   fn write_host_object<'s, 'i>(
@@ -245,9 +261,9 @@ impl StructuredCloneHostObjectRegistry
     serializer: &dyn v8::ValueSerializerHelper,
   ) -> Option<bool> {
     if let Some(transfer_id) = transfer_id {
-      let interface_name = host_object_interface_name(scope, object)?;
+      let type_id = host_object_type_id(self, scope, object)?;
       let HostObjectHandler::Transferable { tag, .. } =
-        self.inner.handlers_by_interface.get(interface_name)?
+        self.inner.handlers_by_type.get(&type_id)?
       else {
         return None;
       };
@@ -255,9 +271,9 @@ impl StructuredCloneHostObjectRegistry
       serializer.write_uint32(transfer_id);
       return Some(true);
     }
-    let interface_name = host_object_interface_name(scope, object)?;
+    let type_id = host_object_type_id(self, scope, object)?;
     let HostObjectHandler::Serializable { tag, handler, .. } =
-      self.inner.handlers_by_interface.get(interface_name)?
+      self.inner.handlers_by_type.get(&type_id)?
     else {
       return None;
     };
@@ -279,10 +295,8 @@ impl StructuredCloneHostObjectRegistry
     // ExecutionContextExposesInterface-equivalent check once Deno exposes
     // per-realm WebIDL exposure metadata.
     // https://source.chromium.org/chromium/chromium/src/+/main:third_party/blink/renderer/bindings/core/v8/serialization/v8_script_value_deserializer.cc;l=1041-1120?q=ExecutionContextExposesInterface&ss=chromium%2Fchromium%2Fsrc
-    if let Some(HostObjectHandler::Transferable {
-      interface_name: expected_interface_name,
-      ..
-    }) = self.inner.handlers_by_tag[tag as usize]
+    if let Some(HostObjectHandler::Transferable { matches, .. }) =
+      self.inner.handlers_by_tag[tag as usize]
     {
       let mut transfer_id = 0;
       if !deserializer.read_uint32(&mut transfer_id) {
@@ -292,9 +306,7 @@ impl StructuredCloneHostObjectRegistry
         scope,
         transferred_host_objects.get(transfer_id as usize)?,
       );
-      return (host_object_interface_name(scope, object)
-        == Some(expected_interface_name))
-      .then_some(object);
+      return matches(scope, object).then_some(object);
     }
     let HostObjectHandler::Serializable { handler, .. } =
       self.inner.handlers_by_tag[tag as usize]?
@@ -309,11 +321,11 @@ impl StructuredCloneHostObjectRegistry
     scope: &mut v8::PinScope<'s, 'i>,
     object: v8::Local<'s, v8::Object>,
   ) -> Result<bool, JsErrorBox> {
-    let Some(interface_name) = host_object_interface_name(scope, object) else {
+    let Some(type_id) = host_object_type_id(self, scope, object) else {
       return Ok(false);
     };
     let Some(HostObjectHandler::Transferable { validate, .. }) =
-      self.inner.handlers_by_interface.get(interface_name)
+      self.inner.handlers_by_type.get(&type_id)
     else {
       return Ok(false);
     };
@@ -326,18 +338,15 @@ impl StructuredCloneHostObjectRegistry
     scope: &mut v8::PinScope<'s, 'i>,
     object: v8::Local<'s, v8::Object>,
   ) -> Result<Self::TransferData, JsErrorBox> {
-    let interface_name =
-      host_object_interface_name(scope, object).ok_or_else(|| {
+    let type_id =
+      host_object_type_id(self, scope, object).ok_or_else(|| {
         JsErrorBox::new(
           "DOMExceptionDataCloneError",
           "Host object is not transferable",
         )
       })?;
-    let handler = self
-      .inner
-      .handlers_by_interface
-      .get(interface_name)
-      .ok_or_else(|| {
+    let handler =
+      self.inner.handlers_by_type.get(&type_id).ok_or_else(|| {
         JsErrorBox::new(
           "DOMExceptionDataCloneError",
           "Host object is not transferable",
@@ -700,7 +709,7 @@ mod test_transferable {
     fn trace(&self, _visitor: &mut v8::cppgc::Visitor) {}
 
     fn get_name(&self) -> &'static std::ffi::CStr {
-      <Self as deno_core::WebIdlInterface>::INTERFACE_NAME
+      c"TestTransferable"
     }
   }
 
@@ -734,10 +743,6 @@ mod test_transferable {
         detached: Cell::new(false),
       })
     }
-  }
-
-  impl deno_core::WebIdlInterface for TestTransferable {
-    const INTERFACE_NAME: &'static std::ffi::CStr = c"TestTransferable";
   }
 
   impl deno_core::WebIdlTransferable for TestTransferable {}
