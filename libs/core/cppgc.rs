@@ -29,13 +29,16 @@ struct CppGcObject<T: GarbageCollected> {
 // `CppGcObject<T>` is `repr(C)` and always starts with this header. This lets
 // runtime dispatch inspect metadata before it knows `T`.
 //
-// The name-based dispatch is inspired by Blink's ScriptWrappable,
-// WrapperTypeInfo, and ToScriptWrappable. Blink associates an IDL interface
-// descriptor with every wrapper rather than deriving platform-object identity
-// from its C++ implementation type. Deno stores the explicitly supplied CppGC
-// name in the common header so Web IDL dispatch can likewise remain independent
-// of Rust TypeId. It is process-local metadata and must never be serialized.
+// The name-based dispatch is inspired by Blink's ScriptWrappable and
+// WrapperTypeInfo. Blink's TypeDispatcher consults WrapperTypeInfo to apply
+// IDL inheritance rules before casting to the native C++ implementation type.
+// Deno does not have Blink's generated descriptors or CppHeapPointerTag ranges,
+// so it stores an explicitly supplied CppGC name in this common header as a
+// simplified, process-local interface descriptor for registry dispatch. This
+// lets that dispatch avoid depending on Rust TypeId, but does not replace typed
+// unwrap's concrete-type safety check. The name must never be serialized.
 //
+// https://source.chromium.org/chromium/chromium/src/+/main:third_party/blink/renderer/bindings/core/v8/serialization/v8_script_value_serializer.cc
 // https://source.chromium.org/chromium/chromium/src/+/main:third_party/blink/renderer/platform/bindings/script_wrappable.h
 // https://source.chromium.org/chromium/chromium/src/+/main:third_party/blink/renderer/platform/bindings/wrapper_type_info.h
 //
@@ -224,27 +227,6 @@ pub fn try_unwrap_cppgc_object<'sc, T: GarbageCollected + 'static>(
   val: v8::Local<'sc, v8::Value>,
 ) -> Option<UnsafePtr<T>> {
   try_unwrap_cppgc_with::<T>(isolate, val, &[])
-}
-
-/// Returns the concrete Rust type stored in a CppGC API wrapper.
-///
-/// The returned `TypeId` is process-local runtime metadata. It must not be
-/// persisted or used as a structured-clone wire tag.
-pub fn try_get_cppgc_type_id<'sc>(
-  isolate: &mut v8::Isolate,
-  val: v8::Local<'sc, v8::Value>,
-) -> Option<TypeId> {
-  let object = val.try_cast::<v8::Object>().ok()?;
-  if !object.is_api_wrapper() {
-    return None;
-  }
-
-  // SAFETY: Every object wrapped by this module contains a repr(C)
-  // `CppGcObject<T>`, whose first field has the `CppGcObjectHeader` layout.
-  let object = unsafe {
-    v8::Object::unwrap::<CPPGC_SINGLE_TAG, CppGcObjectHeader>(isolate, object)
-  }?;
-  Some(unsafe { object.as_ref() }.tag)
 }
 
 /// Returns the explicit name stored in a CppGC API wrapper.
