@@ -596,6 +596,73 @@ mod serialization {
         .unwrap();
     assert_eq!(value.int32_value(scope), Some(42));
   }
+
+  #[test]
+  fn serializes_image_data() {
+    let mut runtime = runtime();
+    runtime
+      .execute_script(
+        "structured_clone_image_data.js",
+        r#"
+          const { ImageData } = Deno.core.loadExtScript(
+            "ext:deno_web/16_image_data.js",
+          );
+          const { structuredClone } = Deno.core.loadExtScript(
+            "ext:deno_web/02_structured_clone.js",
+          );
+
+          const original = new ImageData(2, 1, {
+            colorSpace: "display-p3",
+          });
+          original.data.set([1, 2, 3, 4, 5, 6, 7, 8]);
+
+          const clone = structuredClone(original);
+
+          if (clone === original) throw new Error("ImageData identity was preserved");
+          if (clone.constructor !== ImageData) throw new Error("invalid ImageData constructor");
+          if (clone.width !== 2 || clone.height !== 1) throw new Error("invalid dimensions");
+          if (clone.colorSpace !== "display-p3") throw new Error("invalid color space");
+          if (clone.pixelFormat !== "rgba-unorm8") throw new Error("invalid pixel format");
+          if (clone.data === original.data) throw new Error("ImageData data identity was preserved");
+          if (clone.data.join(",") !== original.data.join(",")) throw new Error("invalid ImageData data");
+
+          clone.data[0] = 255;
+          if (original.data[0] !== 1) throw new Error("ImageData data was not copied");
+        "#,
+      )
+      .unwrap();
+  }
+
+  #[test]
+  fn serializes_float16_image_data() {
+    let mut runtime = runtime();
+    runtime
+      .execute_script(
+        "structured_clone_float16_image_data.js",
+        r#"
+          const { ImageData } = Deno.core.loadExtScript(
+            "ext:deno_web/16_image_data.js",
+          );
+          const { structuredClone } = Deno.core.loadExtScript(
+            "ext:deno_web/02_structured_clone.js",
+          );
+
+          const original = new ImageData(1, 1, {
+            pixelFormat: "rgba-float16",
+          });
+          original.data.set([1, 2, 3, 4]);
+
+          const clone = structuredClone(original);
+
+          if (clone.data.constructor !== Float16Array) throw new Error("invalid data type");
+          if (clone.pixelFormat !== "rgba-float16") throw new Error("invalid pixel format");
+          if (clone.colorSpace !== "srgb") throw new Error("invalid color space");
+          if (clone.data === original.data) throw new Error("ImageData data identity was preserved");
+          if (clone.data.join(",") !== original.data.join(",")) throw new Error("invalid ImageData data");
+        "#,
+      )
+      .unwrap();
+  }
 }
 
 #[cfg(test)]
@@ -693,9 +760,9 @@ mod host_object_transfer {
     let mut runtime = runtime();
     deno_core::scope!(scope, runtime);
     let context = scope.get_current_context();
-    let mut registry = WebStructuredCloneHostObjectRegistry::default();
+    let mut registry = WebStructuredCloneHostObjectRegistry::new();
     registry.register_transferable::<TestTransferable>(
-      StructuredCloneHostObjectTag::TestTransferable,
+      StructuredCloneHostObjectTag::ImageData,
     );
     let first_source = deno_core::cppgc::make_cppgc_object(
       scope,
