@@ -4,8 +4,6 @@ use std::any::TypeId;
 use std::any::type_name;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
-use std::sync::Mutex;
-use std::sync::OnceLock;
 
 use serde::Deserialize;
 use serde::Serialize;
@@ -17,34 +15,6 @@ use crate::runtime::SnapshotLoadDataStore;
 use crate::runtime::SnapshotStoreDataStore;
 
 const CPPGC_SINGLE_TAG: u16 = 1;
-
-/// Process-local metadata shared by every CppGC allocation of one Rust type.
-///
-/// This is intentionally not serialized. A future Web IDL codegen migration
-/// can replace the registry-backed descriptors with generated static ones.
-struct CppGcTypeInfo {
-  type_id: TypeId,
-  name: &'static std::ffi::CStr,
-}
-
-static CPPGC_TYPE_INFOS: OnceLock<
-  Mutex<HashMap<TypeId, &'static CppGcTypeInfo>>,
-> = OnceLock::new();
-
-fn cppgc_type_info<T: GarbageCollected + 'static>(
-  name: &'static std::ffi::CStr,
-) -> &'static CppGcTypeInfo {
-  let type_id = TypeId::of::<T>();
-  let mut type_infos = CPPGC_TYPE_INFOS
-    .get_or_init(Default::default)
-    .lock()
-    .unwrap();
-  let type_info = type_infos
-    .entry(type_id)
-    .or_insert_with(|| Box::leak(Box::new(CppGcTypeInfo { type_id, name })));
-  debug_assert_eq!(type_info.name, name);
-  *type_info
-}
 
 // rusty_v8 supports CppGC values with alignment up to 16. Fixing the wrapper
 // to that alignment also lets `CppGcObjectHeader` inspect every instantiation
@@ -62,17 +32,18 @@ struct CppGcObject<T: GarbageCollected> {
 // WrapperTypeInfo. Blink's TypeDispatcher consults WrapperTypeInfo to apply
 // IDL inheritance rules before casting to the native C++ implementation type.
 // Deno does not have Blink's generated descriptors or CppHeapPointerTag ranges,
-// so it stores a pointer to process-local CppGC type metadata in this common
-// header as a simplified interface descriptor for registry dispatch. This lets
-// that dispatch avoid depending on Rust TypeId, but does not replace typed
-// unwrap's concrete-type safety check. The metadata must never be serialized.
+// so it stores an explicitly supplied CppGC name in this common header as a
+// simplified, process-local interface descriptor for registry dispatch. This
+// lets that dispatch avoid depending on Rust TypeId, but does not replace typed
+// unwrap's concrete-type safety check. The name must never be serialized.
 //
 // https://source.chromium.org/chromium/chromium/src/+/main:third_party/blink/renderer/bindings/core/v8/serialization/v8_script_value_serializer.cc
 // https://source.chromium.org/chromium/chromium/src/+/main:third_party/blink/renderer/platform/bindings/script_wrappable.h
 // https://source.chromium.org/chromium/chromium/src/+/main:third_party/blink/renderer/platform/bindings/wrapper_type_info.h
 #[repr(C, align(16))]
 struct CppGcObjectHeader {
-  type_info: &'static CppGcTypeInfo,
+  tag: TypeId,
+  name: &'static std::ffi::CStr,
 }
 
 unsafe impl GarbageCollected for CppGcObjectHeader {
@@ -145,12 +116,15 @@ pub fn wrap_object<'a, T: GarbageCollected + 'static>(
   t: T,
 ) -> v8::Local<'a, v8::Object> {
   let heap = isolate.get_cpp_heap().unwrap();
-  let type_info = cppgc_type_info::<T>(t.get_name());
+  let name = t.get_name();
   unsafe {
     let member = v8::cppgc::make_garbage_collected(
       heap,
       CppGcObject {
-        header: CppGcObjectHeader { type_info },
+        header: CppGcObjectHeader {
+          tag: TypeId::of::<T>(),
+          name,
+        },
         member: t,
       },
     );
@@ -220,7 +194,7 @@ fn try_unwrap_cppgc_with<'sc, T: GarbageCollected + 'static>(
     v8::Object::unwrap::<CPPGC_SINGLE_TAG, CppGcObject<T>>(isolate, obj)
   }?;
 
-  let tag = unsafe { obj.as_ref() }.header.type_info.type_id;
+  let tag = unsafe { obj.as_ref() }.header.tag;
   if tag != TypeId::of::<T>() && !inheriting.contains(&tag) {
     return None;
   }
@@ -263,7 +237,7 @@ pub fn try_get_cppgc_name<'sc>(
   let object = unsafe {
     v8::Object::unwrap::<CPPGC_SINGLE_TAG, CppGcObjectHeader>(isolate, object)
   }?;
-  Some(unsafe { object.as_ref() }.type_info.name)
+  Some(unsafe { object.as_ref() }.name)
 }
 
 #[doc(hidden)]
@@ -648,15 +622,6 @@ mod tests {
     check::<Derived2, BaseType>();
     check::<Derived2, Derived>();
   };
-
-  #[test]
-  fn type_info_is_shared_by_rust_type() {
-    let first = cppgc_type_info::<BaseType>(c"BaseType");
-    let second = cppgc_type_info::<BaseType>(c"BaseType");
-
-    assert!(std::ptr::eq(first, second));
-    assert_eq!(std::mem::size_of::<CppGcObjectHeader>(), 16);
-  }
 
   #[test]
   fn inheriting_types_list_contains_derived() {
