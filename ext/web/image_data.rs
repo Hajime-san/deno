@@ -63,15 +63,24 @@ pub enum ImageDataError {
 }
 
 #[derive(WebIDL, Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
 #[webidl(enum)]
 pub enum PredefinedColorSpace {
   #[webidl(rename = "srgb")]
-  Srgb,
+  Srgb = 0,
   #[webidl(rename = "display-p3")]
-  DisplayP3,
+  DisplayP3 = 1,
 }
 
 impl PredefinedColorSpace {
+  fn from_u32(value: u32) -> Option<Self> {
+    match value {
+      value if value == Self::Srgb as u32 => Some(Self::Srgb),
+      value if value == Self::DisplayP3 as u32 => Some(Self::DisplayP3),
+      _ => None,
+    }
+  }
+
   fn name(self) -> &'static str {
     match self {
       Self::Srgb => "srgb",
@@ -81,15 +90,24 @@ impl PredefinedColorSpace {
 }
 
 #[derive(WebIDL, Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
 #[webidl(enum)]
 pub enum ImageDataPixelFormat {
   #[webidl(rename = "rgba-unorm8")]
-  RgbaUnorm8,
+  RgbaUnorm8 = 0,
   #[webidl(rename = "rgba-float16")]
-  RgbaFloat16,
+  RgbaFloat16 = 1,
 }
 
 impl ImageDataPixelFormat {
+  fn from_u32(value: u32) -> Option<Self> {
+    match value {
+      value if value == Self::RgbaUnorm8 as u32 => Some(Self::RgbaUnorm8),
+      value if value == Self::RgbaFloat16 as u32 => Some(Self::RgbaFloat16),
+      _ => None,
+    }
+  }
+
   fn name(self) -> &'static str {
     match self {
       Self::RgbaUnorm8 => "rgba-unorm8",
@@ -127,9 +145,9 @@ pub struct ImageData {
 enum ImageDataSerializationTag {
   // No value; terminates the settings sequence.
   End = 0,
-  // Followed by SerializedPredefinedColorSpace.
+  // Followed by PredefinedColorSpace.
   PredefinedColorSpace = 1,
-  // Followed by SerializedImageDataPixelFormat.
+  // Followed by ImageDataPixelFormat.
   PixelFormat = 2,
   // Retired subtags must remain reserved and must never be reused.
 }
@@ -147,62 +165,6 @@ impl ImageDataSerializationTag {
   }
 }
 
-// Stable wire values, deliberately separate from the WebIDL enum declaration.
-#[derive(Clone, Copy)]
-#[repr(u32)]
-enum SerializedPredefinedColorSpace {
-  Srgb = 0,
-  DisplayP3 = 1,
-}
-
-impl SerializedPredefinedColorSpace {
-  fn from_color_space(value: PredefinedColorSpace) -> Self {
-    match value {
-      PredefinedColorSpace::Srgb => Self::Srgb,
-      PredefinedColorSpace::DisplayP3 => Self::DisplayP3,
-    }
-  }
-
-  fn into_color_space(value: u32) -> Option<PredefinedColorSpace> {
-    match value {
-      value if value == Self::Srgb as u32 => Some(PredefinedColorSpace::Srgb),
-      value if value == Self::DisplayP3 as u32 => {
-        Some(PredefinedColorSpace::DisplayP3)
-      }
-      _ => None,
-    }
-  }
-}
-
-// Stable wire values, deliberately separate from the WebIDL enum declaration.
-#[derive(Clone, Copy)]
-#[repr(u32)]
-enum SerializedImageDataPixelFormat {
-  RgbaUnorm8 = 0,
-  RgbaFloat16 = 1,
-}
-
-impl SerializedImageDataPixelFormat {
-  fn from_pixel_format(value: ImageDataPixelFormat) -> Self {
-    match value {
-      ImageDataPixelFormat::RgbaUnorm8 => Self::RgbaUnorm8,
-      ImageDataPixelFormat::RgbaFloat16 => Self::RgbaFloat16,
-    }
-  }
-
-  fn into_pixel_format(value: u32) -> Option<ImageDataPixelFormat> {
-    match value {
-      value if value == Self::RgbaUnorm8 as u32 => {
-        Some(ImageDataPixelFormat::RgbaUnorm8)
-      }
-      value if value == Self::RgbaFloat16 as u32 => {
-        Some(ImageDataPixelFormat::RgbaFloat16)
-      }
-      _ => None,
-    }
-  }
-}
-
 impl StructuredCloneHostObject for ImageData {
   fn write_structured_clone_payload<'s, 'i>(
     &self,
@@ -212,13 +174,9 @@ impl StructuredCloneHostObject for ImageData {
   ) -> Option<bool> {
     serializer
       .write_uint32(ImageDataSerializationTag::PredefinedColorSpace as u32);
-    serializer.write_uint32(SerializedPredefinedColorSpace::from_color_space(
-      self.color_space,
-    ) as u32);
+    serializer.write_uint32(self.color_space as u32);
     serializer.write_uint32(ImageDataSerializationTag::PixelFormat as u32);
-    serializer.write_uint32(SerializedImageDataPixelFormat::from_pixel_format(
-      self.pixel_format,
-    ) as u32);
+    serializer.write_uint32(self.pixel_format as u32);
     serializer.write_uint32(ImageDataSerializationTag::End as u32);
     serializer.write_uint32(self.width);
     serializer.write_uint32(self.height);
@@ -245,16 +203,14 @@ impl StructuredCloneHostObject for ImageData {
           if !deserializer.read_uint32(&mut value) {
             return None;
           }
-          color_space =
-            SerializedPredefinedColorSpace::into_color_space(value)?;
+          color_space = PredefinedColorSpace::from_u32(value)?;
         }
         ImageDataSerializationTag::PixelFormat => {
           let mut value = 0;
           if !deserializer.read_uint32(&mut value) {
             return None;
           }
-          pixel_format =
-            SerializedImageDataPixelFormat::into_pixel_format(value)?;
+          pixel_format = ImageDataPixelFormat::from_u32(value)?;
         }
       }
     }
