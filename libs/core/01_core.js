@@ -1173,7 +1173,7 @@
     encode: (text) => op_encode(text),
     encodeBinaryString: (buffer) => op_encode_binary_string(buffer),
     decode: (buffer) => op_decode(buffer),
-    _structuredClone: (value, deserializers) =>
+    structuredClone: (value, deserializers) =>
       op_structured_clone(value, deserializers ?? cloneableDeserializers),
     serialize: (
       value,
