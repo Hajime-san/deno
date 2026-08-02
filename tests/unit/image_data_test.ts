@@ -1,9 +1,6 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
-import {
-  assertEquals,
-  assertStrictEquals,
-} from "./test_util.ts";
+import { assertEquals, assertStrictEquals } from "./test_util.ts";
 
 Deno.test(function imageDataInitializedWithSourceWidthAndHeight() {
   const imageData = new ImageData(16, 9);
