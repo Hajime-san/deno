@@ -13,20 +13,23 @@ use crate::webidl::WebIdlConverter;
 use crate::webidl::WebIdlError;
 use crate::webidl::WebIdlErrorKind;
 
-// The structuredClone implementation does not correspond one-to-one with the
-// steps in the WHATWG spec.
+// The base internal inplementation of structuredClone, which are
+// StructuredSerializeInternal/StructuredDeserialize
+// StructuredSerializeWithTransfer/StructuredDeserializeWithTransfer
+// does not correspond one-to-one with the steps in the WHATWG spec.
 //
 // Recursive serialization and deserialization of ECMAScript built-in object
 // graphs is delegated to V8's ValueSerializer and ValueDeserializer. This
 // preserves cycles, shared references, and V8's representation of built-ins
 // such as Array, Map, Set, Date, and more.
 //
-// Deno implements platform objects that V8 does not know about. This includes
-// Web platform objects such as Blob, whose primary interface is [Serializable],
-// and OffscreenCanvas, whose primary interface is [Transferable]. Delegates
-// implementing v8::ValueSerializerImpl and v8::ValueDeserializerImpl detect,
-// serialize, and deserialize these platform objects within an object graph.
+// Deno should implements platform(host) objects that V8 does not know about.
+// It includes Web platform objects such as Blob is [Serializable] or
+// OffscreenCanvas is [Transferable].
+// Delegates implementing v8::ValueSerializerImpl and v8::ValueDeserializerImpl
+// detect, serialize, and deserialize these platform objects within an object graph.
 //
+// TODO: do not needed to document
 // Transfer list validation, transferability checks, ownership transfer, and
 // detachment belong to the outer implementation of WHATWG
 // StructuredSerializeWithTransfer. The V8 serializer receives the transfer
@@ -54,7 +57,7 @@ pub struct StructuredDeserializeWithTransferResult<'s> {
 
 // Deno wraps V8's serialized data in an embedder-controlled version envelope:
 //
-//   0xFE | Deno version:uint32(varint) | V8 header | V8 payload
+//   0xFE | wire format version:uint32(varint) | V8 header | V8 payload
 //
 // The outer version covers Deno host-object tags and payloads, while the inner
 // V8 header carries V8's independently versioned wire format. The envelope is
@@ -78,10 +81,10 @@ pub const STRUCTURED_CLONE_WIRE_FORMAT_VERSION: u32 = 1;
 pub enum StructuredCloneHostObjectTag {
   /// Serializing order:
   ///
-  /// settings of ImageDataSerializationTag:u32,
-  /// ImageDataSerializationTag::End,
-  /// width:u32,
-  /// height:u32,
+  /// settings of ImageDataSerializationTag: u32,
+  /// ImageDataSerializationTag::End: u32,
+  /// width: u32,
+  /// height: u32,
   /// data: V8-serialized Uint8ClampedArray/Float16Array
   ImageData = b'#',
 }
@@ -117,8 +120,15 @@ pub trait StructuredCloneHostObject:
   WebIdlSerializable + GarbageCollected + Sized + 'static
 {
   /// Spec sometimes outline a specific order of operations,
-  /// however unless there are specific dependencies, we don't need to keep up to it.
+  /// however unless there are specific dependencies each other,
+  /// we don't need to keep up to it.
+  ///
   /// e.g.,
+  ///
+  /// ImageData objects are serializable objects. Their serialization steps, given value and serialized, are:
+  /// 1. Set serialized.[[Data]] to the sub-serialization of the value of value's data attribute.
+  /// 2. Set serialized.[[Width]] to the value of value's width attribute.
+  /// 3. ...
   /// https://html.spec.whatwg.org/multipage/imagebitmap-and-animations.html#imagedata
   fn write_structured_clone_payload<'s, 'i>(
     &self,
@@ -358,7 +368,7 @@ where
 
 struct V8DeserializerDelegate<'a, R> {
   host_objects: &'a R,
-  // This is the explicit target realm for nested host-object values.
+  // Explicit target realm for nested host-object values.
   target_realm: v8::Global<v8::Context>,
   wire_format_version: u32,
   transferred_host_objects: Vec<v8::Global<v8::Object>>,
@@ -418,10 +428,12 @@ fn structured_serialize_internal_with_transfers<'s, 'i, R>(
 where
   R: StructuredCloneHostObjectRegistry,
 {
+  // 5. If value is a Symbol, then throw a "DataCloneError" DOMException.
   if value.is_symbol() {
     return Err(JsErrorBox::new("DataCloneError", "Cannot serialize Symbol"));
   }
 
+  // TODO: Need to check accurate
   // V8 owns the recursive object graph traversal, including reference tracking
   // for aliases and cycles. Always produce owned bytes at this intermediate
   // layer so the result can be persisted or moved to another isolate. Callers
