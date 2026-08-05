@@ -302,11 +302,6 @@ impl StructuredCloneHostObjectRegistry
     transferred_host_objects: &[v8::Global<v8::Object>],
   ) -> Option<v8::Local<'s, v8::Object>> {
     let tag = *deserializer.read_raw_bytes(1)?.first()?;
-    // Validate that the transferred object has the interface associated with
-    // the serialized tag. TODO: add Blink's additional
-    // ExecutionContextExposesInterface-equivalent check once Deno exposes
-    // per-realm WebIDL exposure metadata.
-    // https://source.chromium.org/chromium/chromium/src/+/main:third_party/blink/renderer/bindings/core/v8/serialization/v8_script_value_deserializer.cc;l=1041-1120?q=ExecutionContextExposesInterface&ss=chromium%2Fchromium%2Fsrc
     if let Some(HostObjectHandler::Transferable { matches, .. }) =
       self.inner.handlers_by_tag[tag as usize]
     {

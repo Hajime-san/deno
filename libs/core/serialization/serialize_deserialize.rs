@@ -458,6 +458,15 @@ fn data_clone_error(message: impl Into<String>) -> JsErrorBox {
   JsErrorBox::new("DOMExceptionDataCloneError", message.into())
 }
 
+// FIXME:
+// Should implement Messageport as a fully Rust CppGc.
+//
+// This function internally validates the `options` argument for `structuredClone`.
+// It must be considered that this function executes within a `MessagePort`.
+// https://html.spec.whatwg.org/multipage/structured-data.html#performing-structured-clones-from-other-specifications
+// > messagePort.postMessage() uses this pair of abstract operations, as the destination realm is not known until the MessagePort has been shipped.
+// https://html.spec.whatwg.org/multipage/web-messaging.html#dom-structuredserializeoptions-transfer
+//
 // https://html.spec.whatwg.org/multipage/structured-data.html#structuredserializewithtransfer
 pub fn structured_serialize_with_transfer<'s, 'i, R>(
   scope: &mut v8::PinScope<'s, 'i>,
@@ -690,6 +699,12 @@ fn deserialize_v8_graph<'s, 'i, R>(
 where
   R: StructuredCloneHostObjectRegistry,
 {
+  // TODO:
+  // 22.2. If the interface identified by interfaceName is not exposed in targetRealm,
+  // then throw a "DataCloneError" DOMException.
+  // https://html.spec.whatwg.org/multipage/structured-data.html#structureddeserialize
+  // https://source.chromium.org/chromium/chromium/src/+/main:third_party/blink/renderer/bindings/core/v8/serialization/v8_script_value_deserializer.cc;l=1041-1120?q=ExecutionContextExposesInterface&ss=chromium%2Fchromium%2Fsrc
+
   let (wire_format_version, bytes) = read_embedder_envelope(bytes)?;
   if wire_format_version == 0
     || wire_format_version > host_objects.wire_format_version()
