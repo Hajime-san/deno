@@ -483,40 +483,50 @@ where
   let mut transferred_host_objects = Vec::new();
   let seen = v8::Set::new(scope);
 
+  // 2.
   for transferable in transfer_list.iter().copied() {
-    if seen.has(scope, transferable).unwrap_or(false) {
-      return Err(data_clone_error("Transfer list contains duplicate object"));
-    }
-    if seen.add(scope, transferable).is_none() {
-      return Err(data_clone_error("Cannot index transfer list"));
+    // 1.
+    let Ok(object) = transferable.try_cast::<v8::Object>() else {
+      return Err(data_clone_error(
+        "Cannot transfer type",
+      ));
+    };
+    if !transferable.is_array_buffer() &&
+        !host_objects.validate_transferable_host_object(scope, object)?
+      {
+      return Err(data_clone_error("Cannot transfer type"));
+    } else {
+      transferred_host_objects.push(object);
+      prepared.push(PreparedTransfer::HostObject(object));
     }
 
-    if let Ok(array_buffer) = transferable.try_cast::<v8::ArrayBuffer>() {
-      if array_buffer.was_detached() {
-        return Err(data_clone_error(
-          "Transfer list contains a detached ArrayBuffer",
-        ));
-      }
+    // 2.
+    let Ok(array_buffer) = transferable.try_cast::<v8::ArrayBuffer>() else {
+      return Err(data_clone_error(
+        "Cannot transfer type",
+      ));
+    };
+    if array_buffer.is_shared_array_buffer() {
+      return Err(data_clone_error(
+        "Cannot transfer shared array buffer",
+      ));
+    } else {
       let transfer_id = transferred_array_buffers.len() as u32;
       transferred_array_buffers.push((transfer_id, array_buffer));
       prepared.push(PreparedTransfer::ArrayBuffer(array_buffer));
-      continue;
     }
 
-    let Ok(object) = transferable.try_cast::<v8::Object>() else {
-      return Err(data_clone_error(
-        "Value in transfer list is not transferable",
-      ));
-    };
-    if !host_objects.validate_transferable_host_object(scope, object)? {
-      return Err(data_clone_error(
-        "Value in transfer list is not transferable",
-      ));
+    // 3.
+    if seen.has(scope, transferable).unwrap_or(false) {
+      return Err(data_clone_error("Cannot transfer value twice"));
     }
-    transferred_host_objects.push(object);
-    prepared.push(PreparedTransfer::HostObject(object));
+    // 4.
+    if seen.add(scope, transferable).is_none() {
+      return Err(data_clone_error("Cannot index transfer list"));
+    }
   }
 
+  // 3.
   let serialized = structured_serialize_internal_with_transfers(
     scope,
     context,
@@ -536,15 +546,24 @@ where
     });
   }
 
+  // 4.
   let mut transfer_data_holders = Vec::with_capacity(prepared.len());
+  // 5.
   for transferable in prepared {
     match transferable {
+      // 4.
       PreparedTransfer::ArrayBuffer(array_buffer) => {
-        if array_buffer.was_detached() || !array_buffer.is_detachable() {
+        if // 1.
+          !array_buffer.is_detachable() ||
+          // 2.
+          array_buffer.was_detached(){
           return Err(data_clone_error(
             "ArrayBuffer became detached or non-transferable while serializing",
           ));
         }
+
+        // operate detach
+        // 3.
         let backing_store = array_buffer.get_backing_store();
         if array_buffer.detach(None) != Some(true) {
           return Err(data_clone_error("ArrayBuffer could not be detached"));
@@ -552,12 +571,18 @@ where
         transfer_data_holders
           .push(StructuredCloneTransferData::ArrayBuffer(backing_store));
       }
+      // 5.
       PreparedTransfer::HostObject(object) => {
+        // TODO:
+        // need to check the host object is detached
+        // 1.
         if !host_objects.validate_transferable_host_object(scope, object)? {
           return Err(data_clone_error(
             "Host object became detached while serializing",
           ));
         }
+        // operate detach
+        // 5.
         let data = host_objects.transfer_host_object(scope, object)?;
         transfer_data_holders
           .push(StructuredCloneTransferData::HostObject(data));
