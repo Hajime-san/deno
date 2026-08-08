@@ -582,12 +582,11 @@ where
   // 5.
   for transferable in prepared {
     match transferable {
-      // 4.
+      // 5.4.
       PreparedTransfer::ArrayBuffer(array_buffer) => {
         if
-        // 1.
+        // 5.1.
         !array_buffer.is_detachable() ||
-          // 2.
           array_buffer.was_detached()
         {
           return Err(data_clone_error(
@@ -595,26 +594,27 @@ where
           ));
         }
 
-        // operate detach
-        // 3.
+        // 5.4.1 ~ 5.4.2
+        // delegate ArrayBuffer operations to V8
         let backing_store = array_buffer.get_backing_store();
+        // 5.4.3.
         if array_buffer.detach(None) != Some(true) {
           return Err(data_clone_error("ArrayBuffer could not be detached"));
         }
         transfer_data_holders
           .push(StructuredCloneTransferData::ArrayBuffer(backing_store));
       }
-      // 5.
+      // 5.5.
       PreparedTransfer::HostObject(object) => {
-        // 1.
+        // 5.2.
         if host_objects.was_detached_host_object(scope, object)? {
           return Err(data_clone_error(
             "Host object became detached while serializing",
           ));
         }
-        // 4.
+        // 5.4.
         let data = host_objects.transfer_host_object(scope, object)?;
-        // 5. operate detach
+        // 5.5.
         host_objects.detach_host_object(scope, object)?;
         transfer_data_holders
           .push(StructuredCloneTransferData::HostObject(data));
@@ -622,6 +622,7 @@ where
     }
   }
 
+  // 6.
   Ok(StructuredSerializeWithTransferResult {
     serialized,
     transfer_data_holders,
