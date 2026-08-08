@@ -36,15 +36,19 @@ type ReadHandler = for<'s, 'i> fn(
   &dyn v8::ValueDeserializerHelper,
   u32,
 ) -> Option<v8::Local<'s, v8::Object>>;
-type ValidateTransferHandler = for<'s, 'i> fn(
+type WasDetachedHandler = for<'s, 'i> fn(
   &mut v8::PinScope<'s, 'i>,
   v8::Local<'s, v8::Object>,
-) -> Result<(), JsErrorBox>;
+) -> Result<bool, JsErrorBox>;
 type TransferHandler =
   for<'s, 'i> fn(
     &mut v8::PinScope<'s, 'i>,
     v8::Local<'s, v8::Object>,
   ) -> Result<WebStructuredCloneTransferData, JsErrorBox>;
+type DetachHandler = for<'s, 'i> fn(
+  &mut v8::PinScope<'s, 'i>,
+  v8::Local<'s, v8::Object>,
+) -> Result<(), JsErrorBox>;
 type ReceiveTransferHandler =
   for<'s, 'i> fn(
     &mut v8::PinScope<'s, 'i>,
@@ -70,8 +74,9 @@ enum HostObjectHandler {
   Transferable {
     tag: u8,
     matches: TypeMatchHandler,
-    validate: ValidateTransferHandler,
+    was_detached: WasDetachedHandler,
     transfer: TransferHandler,
+    detach: DetachHandler,
   },
 }
 
@@ -155,8 +160,9 @@ impl WebStructuredCloneHostObjectRegistry {
     self.register_handler::<T>(HostObjectHandler::Transferable {
       tag,
       matches: type_matches::<T>,
-      validate: deno_core::validate_structured_clone_transferable::<T>,
+      was_detached: deno_core::structured_clone_transferable_was_detached::<T>,
       transfer: transfer_host_object::<T>,
+      detach: deno_core::detach_structured_clone_transferable::<T>,
     });
   }
 }
@@ -323,7 +329,7 @@ impl StructuredCloneHostObjectRegistry
     (handler.read)(scope, context, deserializer, wire_format_version)
   }
 
-  fn validate_transferable_host_object<'s, 'i>(
+  fn is_transferable_host_object<'s, 'i>(
     &self,
     scope: &mut v8::PinScope<'s, 'i>,
     object: v8::Local<'s, v8::Object>,
@@ -331,13 +337,32 @@ impl StructuredCloneHostObjectRegistry
     let Some(type_id) = host_object_type_id(self, scope, object) else {
       return Ok(false);
     };
-    let Some(HostObjectHandler::Transferable { validate, .. }) =
+    Ok(matches!(
+      self.inner.handlers_by_type.get(&type_id),
+      Some(HostObjectHandler::Transferable { .. })
+    ))
+  }
+
+  fn was_detached_host_object<'s, 'i>(
+    &self,
+    scope: &mut v8::PinScope<'s, 'i>,
+    object: v8::Local<'s, v8::Object>,
+  ) -> Result<bool, JsErrorBox> {
+    let Some(type_id) = host_object_type_id(self, scope, object) else {
+      return Err(JsErrorBox::new(
+        "DOMExceptionDataCloneError",
+        "Host object is not transferable",
+      ));
+    };
+    let Some(HostObjectHandler::Transferable { was_detached, .. }) =
       self.inner.handlers_by_type.get(&type_id)
     else {
-      return Ok(false);
+      return Err(JsErrorBox::new(
+        "DOMExceptionDataCloneError",
+        "Host object is not transferable",
+      ));
     };
-    (validate)(scope, object)?;
-    Ok(true)
+    (was_detached)(scope, object)
   }
 
   fn transfer_host_object<'s, 'i>(
@@ -366,6 +391,34 @@ impl StructuredCloneHostObjectRegistry
       ));
     };
     (transfer)(scope, object)
+  }
+
+  fn detach_host_object<'s, 'i>(
+    &self,
+    scope: &mut v8::PinScope<'s, 'i>,
+    object: v8::Local<'s, v8::Object>,
+  ) -> Result<(), JsErrorBox> {
+    let type_id =
+      host_object_type_id(self, scope, object).ok_or_else(|| {
+        JsErrorBox::new(
+          "DOMExceptionDataCloneError",
+          "Host object is not transferable",
+        )
+      })?;
+    let handler =
+      self.inner.handlers_by_type.get(&type_id).ok_or_else(|| {
+        JsErrorBox::new(
+          "DOMExceptionDataCloneError",
+          "Host object is not transferable",
+        )
+      })?;
+    let HostObjectHandler::Transferable { detach, .. } = handler else {
+      return Err(JsErrorBox::new(
+        "DOMExceptionDataCloneError",
+        "Host object is not transferable",
+      ));
+    };
+    (detach)(scope, object)
   }
 
   fn receive_host_object<'s, 'i>(
@@ -755,22 +808,19 @@ mod test_transferable {
   impl StructuredCloneTransferable for TestTransferable {
     type TransferData = u32;
 
-    fn validate_transfer(&self) -> Result<(), JsErrorBox> {
-      if self.detached.get() {
-        return Err(JsErrorBox::new(
-          "DOMExceptionDataCloneError",
-          "TestTransferable is detached",
-        ));
-      }
-      Ok(())
+    fn was_detached(&self) -> bool {
+      self.detached.get()
     }
 
     fn transfer<'s, 'i>(
       &self,
       _scope: &mut v8::PinScope<'s, 'i>,
     ) -> Result<Self::TransferData, JsErrorBox> {
-      self.detached.set(true);
       Ok(self.value)
+    }
+
+    fn detach(&self) {
+      self.detached.set(true);
     }
 
     fn receive<'s, 'i>(
@@ -870,6 +920,16 @@ mod host_object_transfer {
       .unwrap();
       assert!(source_value.detached.get());
     }
+    let null = v8::null(scope);
+    assert!(
+      deno_core::structured_serialize_with_transfer(
+        scope,
+        null.into(),
+        &[first_source.into()],
+        &registry,
+      )
+      .is_err()
+    );
 
     let result = deno_core::structured_deserialize_with_transfer(
       scope, result, context, &registry,

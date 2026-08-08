@@ -155,12 +155,17 @@ pub trait StructuredCloneTransferable:
 {
   type TransferData: 'static;
 
-  fn validate_transfer(&self) -> Result<(), JsErrorBox>;
+  /// Returns the state of this object's [[Detached]] internal slot.
+  fn was_detached(&self) -> bool;
 
+  /// Performs the interface's transfer steps without changing [[Detached]].
   fn transfer<'s, 'i>(
     &self,
     scope: &mut v8::PinScope<'s, 'i>,
   ) -> Result<Self::TransferData, JsErrorBox>;
+
+  /// Sets this object's [[Detached]] internal slot after transfer succeeds.
+  fn detach(&self);
 
   fn receive<'s, 'i>(
     scope: &mut v8::PinScope<'s, 'i>,
@@ -211,17 +216,19 @@ pub fn read_structured_clone_host_object<
   Some(crate::cppgc::make_cppgc_object(scope, value))
 }
 
-pub fn validate_structured_clone_transferable<
+pub fn structured_clone_transferable_was_detached<
   's,
   'i,
   T: StructuredCloneTransferable,
 >(
   scope: &mut v8::PinScope<'s, 'i>,
   object: v8::Local<'s, v8::Object>,
-) -> Result<(), JsErrorBox> {
+) -> Result<bool, JsErrorBox> {
   let value = crate::cppgc::try_unwrap_cppgc_object::<T>(scope, object.into())
     .ok_or_else(|| data_clone_error("Transferable has an invalid brand"))?;
-  value.validate_transfer()
+  // SAFETY: `object` remains live for the duration of this synchronous call.
+  let value = unsafe { value.as_ref() };
+  Ok(value.was_detached())
 }
 
 pub fn transfer_structured_clone_host_object<
@@ -234,9 +241,25 @@ pub fn transfer_structured_clone_host_object<
 ) -> Result<T::TransferData, JsErrorBox> {
   let value = crate::cppgc::try_unwrap_cppgc_object::<T>(scope, object.into())
     .ok_or_else(|| data_clone_error("Transferable has an invalid brand"))?;
-  // SAFETY: `object` remains live for this V8 serializer callback.
+  // SAFETY: `object` remains live for the duration of this synchronous call.
   let value = unsafe { value.as_ref() };
   value.transfer(scope)
+}
+
+pub fn detach_structured_clone_transferable<
+  's,
+  'i,
+  T: StructuredCloneTransferable,
+>(
+  scope: &mut v8::PinScope<'s, 'i>,
+  object: v8::Local<'s, v8::Object>,
+) -> Result<(), JsErrorBox> {
+  let value = crate::cppgc::try_unwrap_cppgc_object::<T>(scope, object.into())
+    .ok_or_else(|| data_clone_error("Transferable has an invalid brand"))?;
+  // SAFETY: `object` remains live for the duration of this synchronous call.
+  let value = unsafe { value.as_ref() };
+  value.detach();
+  Ok(())
 }
 
 pub fn receive_structured_clone_host_object<
@@ -285,7 +308,14 @@ pub trait StructuredCloneHostObjectRegistry {
     transferred_host_objects: &[v8::Global<v8::Object>],
   ) -> Option<v8::Local<'s, v8::Object>>;
 
-  fn validate_transferable_host_object<'s, 'i>(
+  fn is_transferable_host_object<'s, 'i>(
+    &self,
+    scope: &mut v8::PinScope<'s, 'i>,
+    object: v8::Local<'s, v8::Object>,
+  ) -> Result<bool, JsErrorBox>;
+
+  /// Returns the transferable object's [[Detached]] state after serialization.
+  fn was_detached_host_object<'s, 'i>(
     &self,
     scope: &mut v8::PinScope<'s, 'i>,
     object: v8::Local<'s, v8::Object>,
@@ -296,6 +326,12 @@ pub trait StructuredCloneHostObjectRegistry {
     scope: &mut v8::PinScope<'s, 'i>,
     object: v8::Local<'s, v8::Object>,
   ) -> Result<Self::TransferData, JsErrorBox>;
+
+  fn detach_host_object<'s, 'i>(
+    &self,
+    scope: &mut v8::PinScope<'s, 'i>,
+    object: v8::Local<'s, v8::Object>,
+  ) -> Result<(), JsErrorBox>;
 
   fn receive_host_object<'s, 'i>(
     &self,
@@ -487,33 +523,28 @@ where
   for transferable in transfer_list.iter().copied() {
     // 1.
     let Ok(object) = transferable.try_cast::<v8::Object>() else {
-      return Err(data_clone_error(
-        "Cannot transfer type",
-      ));
-    };
-    if !transferable.is_array_buffer() &&
-        !host_objects.validate_transferable_host_object(scope, object)?
-      {
       return Err(data_clone_error("Cannot transfer type"));
-    } else {
-      transferred_host_objects.push(object);
-      prepared.push(PreparedTransfer::HostObject(object));
+    };
+    if !transferable.is_array_buffer()
+      && !host_objects.is_transferable_host_object(scope, object)?
+    {
+      return Err(data_clone_error("Cannot transfer type"));
     }
 
     // 2.
-    let Ok(array_buffer) = transferable.try_cast::<v8::ArrayBuffer>() else {
-      return Err(data_clone_error(
-        "Cannot transfer type",
-      ));
-    };
-    if array_buffer.is_shared_array_buffer() {
-      return Err(data_clone_error(
-        "Cannot transfer shared array buffer",
-      ));
-    } else {
+    if transferable.is_array_buffer() {
+      let Ok(array_buffer) = transferable.try_cast::<v8::ArrayBuffer>() else {
+        return Err(data_clone_error("Cannot transfer type"));
+      };
+      if array_buffer.is_shared_array_buffer() {
+        return Err(data_clone_error("Cannot transfer shared array buffer"));
+      }
       let transfer_id = transferred_array_buffers.len() as u32;
       transferred_array_buffers.push((transfer_id, array_buffer));
       prepared.push(PreparedTransfer::ArrayBuffer(array_buffer));
+    } else {
+      transferred_host_objects.push(object);
+      prepared.push(PreparedTransfer::HostObject(object));
     }
 
     // 3.
@@ -553,10 +584,12 @@ where
     match transferable {
       // 4.
       PreparedTransfer::ArrayBuffer(array_buffer) => {
-        if // 1.
-          !array_buffer.is_detachable() ||
+        if
+        // 1.
+        !array_buffer.is_detachable() ||
           // 2.
-          array_buffer.was_detached(){
+          array_buffer.was_detached()
+        {
           return Err(data_clone_error(
             "ArrayBuffer became detached or non-transferable while serializing",
           ));
@@ -573,17 +606,16 @@ where
       }
       // 5.
       PreparedTransfer::HostObject(object) => {
-        // TODO:
-        // need to check the host object is detached
         // 1.
-        if !host_objects.validate_transferable_host_object(scope, object)? {
+        if host_objects.was_detached_host_object(scope, object)? {
           return Err(data_clone_error(
             "Host object became detached while serializing",
           ));
         }
-        // operate detach
-        // 5.
+        // 4.
         let data = host_objects.transfer_host_object(scope, object)?;
+        // 5. operate detach
+        host_objects.detach_host_object(scope, object)?;
         transfer_data_holders
           .push(StructuredCloneTransferData::HostObject(data));
       }
