@@ -110,10 +110,11 @@ pub trait WebIdlSerializable {}
 /// transfer data, and receiving steps are specific to each platform object.
 pub trait WebIdlTransferable {}
 
-/// The common [[Detached]] state carried by Web IDL transferable objects.
+/// The base [[Detached]] slot carried by Web IDL.
 ///
-/// Serializable interfaces can also implement this trait. Their serialization
-/// must fail once the object has been detached.
+/// Serializable/Transferable interfaces which has [[Detached]] slot
+/// should also implement this trait.
+/// Their serialization must fail once the object has been detached.
 pub trait StructuredCloneDetached: GarbageCollected + 'static {
   /// Returns the state of this object's [[Detached]] internal slot.
   fn was_detached(&self) -> bool;
