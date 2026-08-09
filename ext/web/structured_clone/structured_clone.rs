@@ -30,54 +30,70 @@ type WriteHandler = for<'s, 'i> fn(
   v8::Local<'s, v8::Object>,
   &dyn v8::ValueSerializerHelper,
 ) -> Option<bool>;
+
 type ReadHandler = for<'s, 'i> fn(
   &mut v8::PinScope<'s, 'i>,
   v8::Local<'s, v8::Context>,
   &dyn v8::ValueDeserializerHelper,
   u32,
 ) -> Option<v8::Local<'s, v8::Object>>;
+
 type WasDetachedHandler = for<'s, 'i> fn(
   &mut v8::PinScope<'s, 'i>,
   v8::Local<'s, v8::Object>,
 ) -> Result<bool, JsErrorBox>;
+
 type TransferHandler =
   for<'s, 'i> fn(
     &mut v8::PinScope<'s, 'i>,
     v8::Local<'s, v8::Object>,
   ) -> Result<WebStructuredCloneTransferData, JsErrorBox>;
+
 type DetachHandler = for<'s, 'i> fn(
   &mut v8::PinScope<'s, 'i>,
   v8::Local<'s, v8::Object>,
 ) -> Result<(), JsErrorBox>;
+
 type ReceiveTransferHandler =
   for<'s, 'i> fn(
     &mut v8::PinScope<'s, 'i>,
     Box<dyn Any>,
   ) -> Result<v8::Local<'s, v8::Object>, JsErrorBox>;
+
 type TypeMatchHandler =
   for<'s> fn(&mut v8::Isolate, v8::Local<'s, v8::Object>) -> bool;
 
 #[derive(Clone, Copy)]
 struct SerializableHandler {
-  matches: TypeMatchHandler,
+  tag: u8,
   write: WriteHandler,
   read: ReadHandler,
 }
 
 #[derive(Clone, Copy)]
-enum HostObjectHandler {
-  Serializable {
-    tag: u8,
-    handler: SerializableHandler,
-  },
-  #[allow(dead_code)] // No production Web IDL transferable is registered yet.
-  Transferable {
-    tag: u8,
-    matches: TypeMatchHandler,
-    was_detached: WasDetachedHandler,
-    transfer: TransferHandler,
-    detach: DetachHandler,
-  },
+struct TransferableHandler {
+  tag: u8,
+  transfer: TransferHandler,
+}
+
+#[derive(Clone, Copy)]
+struct DetachedHandler {
+  was_detached: WasDetachedHandler,
+  detach: DetachHandler,
+}
+
+#[derive(Clone, Copy)]
+struct HostObjectHandler {
+  matches: TypeMatchHandler,
+  detached: Option<DetachedHandler>,
+  serializable: Option<SerializableHandler>,
+  transferable: Option<TransferableHandler>,
+}
+
+#[derive(Clone, Copy)]
+enum HostObjectTagHandler {
+  Serialized(ReadHandler),
+  Transferred(TypeMatchHandler),
 }
 
 const TAG_COUNT: usize = u8::MAX as usize + 1;
@@ -86,7 +102,7 @@ const TAG_COUNT: usize = u8::MAX as usize + 1;
 struct RegistryInner {
   // Tags are one-byte wire values, so an array avoids hashing and stores each
   // registered handler exactly once for deserialization.
-  handlers_by_tag: [Option<HostObjectHandler>; TAG_COUNT],
+  handlers_by_tag: [Option<HostObjectTagHandler>; TAG_COUNT],
   // TODO: JS host object dispatch should not depend on Rust's TypeId. Replace
   // this with Blink-style generated descriptors (ScriptWrappable /
   // WrapperTypeInfo), or at minimum stable Web IDL interface names, once Deno
@@ -119,10 +135,6 @@ impl WebStructuredCloneHostObjectRegistry {
 
   fn register_handler<T: 'static>(&mut self, handler: HostObjectHandler) {
     let inner = Arc::make_mut(&mut self.inner);
-    let tag = match handler {
-      HostObjectHandler::Serializable { tag, .. }
-      | HostObjectHandler::Transferable { tag, .. } => tag,
-    };
     assert!(
       inner
         .handlers_by_type
@@ -130,25 +142,37 @@ impl WebStructuredCloneHostObjectRegistry {
         .is_none(),
       "structured clone type registered twice"
     );
-    assert!(
-      inner.handlers_by_tag[tag as usize]
-        .replace(handler)
-        .is_none(),
-      "structured clone tag registered twice"
-    );
+    if let Some(serializable) = handler.serializable {
+      assert!(
+        inner.handlers_by_tag[serializable.tag as usize]
+          .replace(HostObjectTagHandler::Serialized(serializable.read))
+          .is_none(),
+        "structured clone tag registered twice"
+      );
+    }
+    if let Some(transferable) = handler.transferable {
+      assert!(
+        inner.handlers_by_tag[transferable.tag as usize]
+          .replace(HostObjectTagHandler::Transferred(handler.matches))
+          .is_none(),
+        "structured clone tag registered twice"
+      );
+    }
   }
 
   fn register_serializable<T: deno_core::StructuredCloneHostObject>(
     &mut self,
     tag: u8,
   ) {
-    self.register_handler::<T>(HostObjectHandler::Serializable {
-      tag,
-      handler: SerializableHandler {
-        matches: type_matches::<T>,
+    self.register_handler::<T>(HostObjectHandler {
+      matches: type_matches::<T>,
+      detached: None,
+      serializable: Some(SerializableHandler {
+        tag,
         write: write_structured_clone_host_object::<T>,
         read: read_structured_clone_host_object::<T>,
-      },
+      }),
+      transferable: None,
     });
   }
 
@@ -157,12 +181,44 @@ impl WebStructuredCloneHostObjectRegistry {
     &mut self,
     tag: u8,
   ) {
-    self.register_handler::<T>(HostObjectHandler::Transferable {
-      tag,
+    self.register_handler::<T>(HostObjectHandler {
       matches: type_matches::<T>,
-      was_detached: deno_core::structured_clone_transferable_was_detached::<T>,
-      transfer: transfer_host_object::<T>,
-      detach: deno_core::detach_structured_clone_transferable::<T>,
+      detached: Some(DetachedHandler {
+        was_detached: deno_core::structured_clone_object_was_detached::<T>,
+        detach: deno_core::detach_structured_clone_object::<T>,
+      }),
+      serializable: None,
+      transferable: Some(TransferableHandler {
+        tag,
+        transfer: transfer_host_object::<T>,
+      }),
+    });
+  }
+
+  #[allow(dead_code)] // No production dual-capability interface is registered yet.
+  fn register_serializable_transferable<
+    T: deno_core::StructuredCloneHostObject
+      + deno_core::StructuredCloneTransferable,
+  >(
+    &mut self,
+    serialized_tag: u8,
+    transferred_tag: u8,
+  ) {
+    self.register_handler::<T>(HostObjectHandler {
+      matches: type_matches::<T>,
+      detached: Some(DetachedHandler {
+        was_detached: deno_core::structured_clone_object_was_detached::<T>,
+        detach: deno_core::detach_structured_clone_object::<T>,
+      }),
+      serializable: Some(SerializableHandler {
+        tag: serialized_tag,
+        write: write_structured_clone_host_object::<T>,
+        read: read_structured_clone_host_object::<T>,
+      }),
+      transferable: Some(TransferableHandler {
+        tag: transferred_tag,
+        transfer: transfer_host_object::<T>,
+      }),
     });
   }
 }
@@ -242,11 +298,7 @@ fn host_object_type_id(
     .handlers_by_type
     .iter()
     .find_map(|(type_id, handler)| {
-      let matches = match handler {
-        HostObjectHandler::Serializable { handler, .. } => handler.matches,
-        HostObjectHandler::Transferable { matches, .. } => *matches,
-      };
-      matches(scope, object).then_some(*type_id)
+      (handler.matches)(scope, object).then_some(*type_id)
     })
 }
 
@@ -278,25 +330,26 @@ impl StructuredCloneHostObjectRegistry
     transfer_id: Option<u32>,
     serializer: &dyn v8::ValueSerializerHelper,
   ) -> Option<bool> {
+    let type_id = host_object_type_id(self, scope, object)?;
+    let handler = self.inner.handlers_by_type.get(&type_id)?;
     if let Some(transfer_id) = transfer_id {
-      let type_id = host_object_type_id(self, scope, object)?;
-      let HostObjectHandler::Transferable { tag, .. } =
-        self.inner.handlers_by_type.get(&type_id)?
-      else {
-        return None;
-      };
-      serializer.write_raw_bytes(&[*tag]);
+      let transferable = handler.transferable?;
+      serializer.write_raw_bytes(&[transferable.tag]);
       serializer.write_uint32(transfer_id);
       return Some(true);
     }
-    let type_id = host_object_type_id(self, scope, object)?;
-    let HostObjectHandler::Serializable { tag, handler, .. } =
-      self.inner.handlers_by_type.get(&type_id)?
-    else {
+    let serializable = handler.serializable?;
+    if let Some(detached) = handler.detached
+      && (detached.was_detached)(scope, object).ok()?
+    {
+      let message =
+        v8::String::new(scope, "Cannot serialize a detached platform object")?;
+      let error = v8::Exception::error(scope, message);
+      scope.throw_exception(error);
       return None;
-    };
-    serializer.write_raw_bytes(&[*tag]);
-    (handler.write)(scope, context, object, serializer)
+    }
+    serializer.write_raw_bytes(&[serializable.tag]);
+    (serializable.write)(scope, context, object, serializer)
   }
 
   fn read_host_object<'s, 'i>(
@@ -308,25 +361,22 @@ impl StructuredCloneHostObjectRegistry
     transferred_host_objects: &[v8::Global<v8::Object>],
   ) -> Option<v8::Local<'s, v8::Object>> {
     let tag = *deserializer.read_raw_bytes(1)?.first()?;
-    if let Some(HostObjectHandler::Transferable { matches, .. }) =
-      self.inner.handlers_by_tag[tag as usize]
-    {
-      let mut transfer_id = 0;
-      if !deserializer.read_uint32(&mut transfer_id) {
-        return None;
+    match self.inner.handlers_by_tag[tag as usize]? {
+      HostObjectTagHandler::Serialized(read) => {
+        read(scope, context, deserializer, wire_format_version)
       }
-      let object = v8::Local::new(
-        scope,
-        transferred_host_objects.get(transfer_id as usize)?,
-      );
-      return matches(scope, object).then_some(object);
+      HostObjectTagHandler::Transferred(matches) => {
+        let mut transfer_id = 0;
+        if !deserializer.read_uint32(&mut transfer_id) {
+          return None;
+        }
+        let object = v8::Local::new(
+          scope,
+          transferred_host_objects.get(transfer_id as usize)?,
+        );
+        matches(scope, object).then_some(object)
+      }
     }
-    let HostObjectHandler::Serializable { handler, .. } =
-      self.inner.handlers_by_tag[tag as usize]?
-    else {
-      return None;
-    };
-    (handler.read)(scope, context, deserializer, wire_format_version)
   }
 
   fn is_transferable_host_object<'s, 'i>(
@@ -337,10 +387,13 @@ impl StructuredCloneHostObjectRegistry
     let Some(type_id) = host_object_type_id(self, scope, object) else {
       return Ok(false);
     };
-    Ok(matches!(
-      self.inner.handlers_by_type.get(&type_id),
-      Some(HostObjectHandler::Transferable { .. })
-    ))
+    Ok(
+      self
+        .inner
+        .handlers_by_type
+        .get(&type_id)
+        .is_some_and(|handler| handler.transferable.is_some()),
+    )
   }
 
   fn was_detached_host_object<'s, 'i>(
@@ -354,15 +407,18 @@ impl StructuredCloneHostObjectRegistry
         "Host object is not transferable",
       ));
     };
-    let Some(HostObjectHandler::Transferable { was_detached, .. }) =
-      self.inner.handlers_by_type.get(&type_id)
+    let Some(detached) = self
+      .inner
+      .handlers_by_type
+      .get(&type_id)
+      .and_then(|handler| handler.detached)
     else {
       return Err(JsErrorBox::new(
         "DOMExceptionDataCloneError",
         "Host object is not transferable",
       ));
     };
-    (was_detached)(scope, object)
+    (detached.was_detached)(scope, object)
   }
 
   fn transfer_host_object<'s, 'i>(
@@ -377,20 +433,24 @@ impl StructuredCloneHostObjectRegistry
           "Host object is not transferable",
         )
       })?;
-    let handler =
-      self.inner.handlers_by_type.get(&type_id).ok_or_else(|| {
+    let transferable = self
+      .inner
+      .handlers_by_type
+      .get(&type_id)
+      .ok_or_else(|| {
+        JsErrorBox::new(
+          "DOMExceptionDataCloneError",
+          "Host object is not transferable",
+        )
+      })?
+      .transferable
+      .ok_or_else(|| {
         JsErrorBox::new(
           "DOMExceptionDataCloneError",
           "Host object is not transferable",
         )
       })?;
-    let HostObjectHandler::Transferable { transfer, .. } = handler else {
-      return Err(JsErrorBox::new(
-        "DOMExceptionDataCloneError",
-        "Host object is not transferable",
-      ));
-    };
-    (transfer)(scope, object)
+    (transferable.transfer)(scope, object)
   }
 
   fn detach_host_object<'s, 'i>(
@@ -405,20 +465,24 @@ impl StructuredCloneHostObjectRegistry
           "Host object is not transferable",
         )
       })?;
-    let handler =
-      self.inner.handlers_by_type.get(&type_id).ok_or_else(|| {
+    let detached = self
+      .inner
+      .handlers_by_type
+      .get(&type_id)
+      .ok_or_else(|| {
+        JsErrorBox::new(
+          "DOMExceptionDataCloneError",
+          "Host object is not transferable",
+        )
+      })?
+      .detached
+      .ok_or_else(|| {
         JsErrorBox::new(
           "DOMExceptionDataCloneError",
           "Host object is not transferable",
         )
       })?;
-    let HostObjectHandler::Transferable { detach, .. } = handler else {
-      return Err(JsErrorBox::new(
-        "DOMExceptionDataCloneError",
-        "Host object is not transferable",
-      ));
-    };
-    (detach)(scope, object)
+    (detached.detach)(scope, object)
   }
 
   fn receive_host_object<'s, 'i>(
@@ -787,6 +851,8 @@ mod test_transferable {
   use std::cell::Cell;
 
   use deno_core::GarbageCollected;
+  use deno_core::StructuredCloneDetached;
+  use deno_core::StructuredCloneHostObject;
   use deno_core::StructuredCloneTransferable;
   use deno_core::v8;
   use deno_error::JsErrorBox;
@@ -805,22 +871,24 @@ mod test_transferable {
     }
   }
 
-  impl StructuredCloneTransferable for TestTransferable {
-    type TransferData = u32;
-
+  impl StructuredCloneDetached for TestTransferable {
     fn was_detached(&self) -> bool {
       self.detached.get()
     }
+
+    fn detach(&self) {
+      self.detached.set(true);
+    }
+  }
+
+  impl StructuredCloneTransferable for TestTransferable {
+    type TransferData = u32;
 
     fn transfer<'s, 'i>(
       &self,
       _scope: &mut v8::PinScope<'s, 'i>,
     ) -> Result<Self::TransferData, JsErrorBox> {
       Ok(self.value)
-    }
-
-    fn detach(&self) {
-      self.detached.set(true);
     }
 
     fn receive<'s, 'i>(
@@ -834,6 +902,32 @@ mod test_transferable {
     }
   }
 
+  impl StructuredCloneHostObject for TestTransferable {
+    fn write_structured_clone_payload<'s, 'i>(
+      &self,
+      _scope: &mut v8::PinScope<'s, 'i>,
+      _context: v8::Local<'s, v8::Context>,
+      serializer: &dyn v8::ValueSerializerHelper,
+    ) -> Option<bool> {
+      serializer.write_uint32(self.value);
+      Some(true)
+    }
+
+    fn read_structured_clone_payload<'s, 'i>(
+      _scope: &mut v8::PinScope<'s, 'i>,
+      _context: v8::Local<'s, v8::Context>,
+      deserializer: &dyn v8::ValueDeserializerHelper,
+      _wire_format_version: u32,
+    ) -> Option<Self> {
+      let mut value = 0;
+      deserializer.read_uint32(&mut value).then_some(Self {
+        value,
+        detached: Cell::new(false),
+      })
+    }
+  }
+
+  impl deno_core::WebIdlSerializable for TestTransferable {}
   impl deno_core::WebIdlTransferable for TestTransferable {}
 }
 
@@ -848,6 +942,7 @@ mod host_object_transfer {
   use super::WebStructuredCloneHostObjectRegistry;
   use super::test_transferable::TestTransferable;
 
+  const TEST_SERIALIZABLE_TAG: u8 = b'}';
   const TEST_TRANSFERABLE_TAG: u8 = b'~';
 
   fn runtime() -> JsRuntime {
@@ -874,7 +969,10 @@ mod host_object_transfer {
     deno_core::scope!(scope, runtime);
     let context = scope.get_current_context();
     let mut registry = WebStructuredCloneHostObjectRegistry::new();
-    registry.register_transferable::<TestTransferable>(TEST_TRANSFERABLE_TAG);
+    registry.register_serializable_transferable::<TestTransferable>(
+      TEST_SERIALIZABLE_TAG,
+      TEST_TRANSFERABLE_TAG,
+    );
     let first_source = deno_core::cppgc::make_cppgc_object(
       scope,
       TestTransferable {
@@ -906,6 +1004,25 @@ mod host_object_transfer {
       Some(true)
     );
 
+    let serialized = deno_core::structured_serialize_internal(
+      scope,
+      first_source.into(),
+      false,
+      &registry,
+    )
+    .unwrap();
+    let cloned =
+      deno_core::structured_deserialize(scope, serialized, context, &registry)
+        .unwrap()
+        .try_cast::<v8::Object>()
+        .unwrap();
+    let cloned_value = deno_core::cppgc::try_unwrap_cppgc_object::<
+      TestTransferable,
+    >(scope, cloned.into())
+    .unwrap();
+    assert_eq!(cloned_value.value, 42);
+    assert!(!cloned_value.detached.get());
+
     let result = deno_core::structured_serialize_with_transfer(
       scope,
       graph.into(),
@@ -919,6 +1036,18 @@ mod host_object_transfer {
       >(scope, source.into())
       .unwrap();
       assert!(source_value.detached.get());
+    }
+    {
+      v8::tc_scope!(let tc_scope, scope);
+      let serialized = deno_core::structured_serialize_internal(
+        tc_scope,
+        first_source.into(),
+        false,
+        &registry,
+      )
+      .unwrap();
+      assert!(serialized.is_empty());
+      assert!(tc_scope.has_caught());
     }
     let null = v8::null(scope);
     assert!(

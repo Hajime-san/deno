@@ -110,6 +110,18 @@ pub trait WebIdlSerializable {}
 /// transfer data, and receiving steps are specific to each platform object.
 pub trait WebIdlTransferable {}
 
+/// The common [[Detached]] state carried by Web IDL transferable objects.
+///
+/// Serializable interfaces can also implement this trait. Their serialization
+/// must fail once the object has been detached.
+pub trait StructuredCloneDetached: GarbageCollected + 'static {
+  /// Returns the state of this object's [[Detached]] internal slot.
+  fn was_detached(&self) -> bool;
+
+  /// Sets this object's [[Detached]] internal slot after transfer succeeds.
+  fn detach(&self);
+}
+
 /// Serialization and deserialization steps for a Web IDL `[Serializable]`
 /// platform object.
 ///
@@ -151,21 +163,15 @@ pub trait StructuredCloneHostObject:
 /// platform object. Transfer data is out-of-band and is never persisted in the
 /// structured-clone wire payload.
 pub trait StructuredCloneTransferable:
-  WebIdlTransferable + GarbageCollected + Sized + 'static
+  WebIdlTransferable + StructuredCloneDetached + Sized + 'static
 {
   type TransferData: 'static;
-
-  /// Returns the state of this object's [[Detached]] internal slot.
-  fn was_detached(&self) -> bool;
 
   /// Performs the interface's transfer steps without changing [[Detached]].
   fn transfer<'s, 'i>(
     &self,
     scope: &mut v8::PinScope<'s, 'i>,
   ) -> Result<Self::TransferData, JsErrorBox>;
-
-  /// Sets this object's [[Detached]] internal slot after transfer succeeds.
-  fn detach(&self);
 
   fn receive<'s, 'i>(
     scope: &mut v8::PinScope<'s, 'i>,
@@ -216,10 +222,10 @@ pub fn read_structured_clone_host_object<
   Some(crate::cppgc::make_cppgc_object(scope, value))
 }
 
-pub fn structured_clone_transferable_was_detached<
+pub fn structured_clone_object_was_detached<
   's,
   'i,
-  T: StructuredCloneTransferable,
+  T: StructuredCloneDetached,
 >(
   scope: &mut v8::PinScope<'s, 'i>,
   object: v8::Local<'s, v8::Object>,
@@ -246,11 +252,7 @@ pub fn transfer_structured_clone_host_object<
   value.transfer(scope)
 }
 
-pub fn detach_structured_clone_transferable<
-  's,
-  'i,
-  T: StructuredCloneTransferable,
->(
+pub fn detach_structured_clone_object<'s, 'i, T: StructuredCloneDetached>(
   scope: &mut v8::PinScope<'s, 'i>,
   object: v8::Local<'s, v8::Object>,
 ) -> Result<(), JsErrorBox> {
@@ -587,9 +589,7 @@ where
       PreparedTransfer::ArrayBuffer(array_buffer) => {
         if
         // 5.1.
-        !array_buffer.is_detachable() ||
-          array_buffer.was_detached()
-        {
+        !array_buffer.is_detachable() || array_buffer.was_detached() {
           return Err(data_clone_error(
             "ArrayBuffer became detached or non-transferable while serializing",
           ));
