@@ -568,6 +568,7 @@ where
     &transferred_host_objects,
   )?;
 
+  // TODO: check the collectness
   // A pending V8 exception is represented by the existing empty-buffer
   // sentinel. In particular, do not detach anything on that path.
   if serialized.is_empty() {
