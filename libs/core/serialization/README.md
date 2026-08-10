@@ -15,22 +15,22 @@ There are three independent identifiers:
 | ------------------------------------------- | ----- | ---------------------------------------------------------------------------- |
 | `STRUCTURED_CLONE_WIRE_FORMAT_VERSION`      | Deno  | The `0xFE` envelope, host-object tags, and Deno host-object payload schemas. |
 | V8 serializer header version                | V8    | The format for ECMAScript built-ins and nested V8 values.                    |
-| `StructuredCloneHostObjectTag` discriminant | Deno  | A permanent identifier for one host-object type.                             |
+| Host-object registry tag                    | Deno  | A permanent identifier for one host-object representation.                   |
 
 V8's serializer format is implemented by V8; see
 [`value-serializer.cc`](https://source.chromium.org/chromium/chromium/src/+/main:v8/src/objects/value-serializer.cc).
 Host-object semantics are embedder code. Blink's structured-clone implementation
 is a useful reference, but Deno does not share Blink's host-object wire format.
 
-Never renumber, reuse, or repurpose a `StructuredCloneHostObjectTag` value.
-Retired values remain reserved.
+Never renumber, reuse, or repurpose a host-object registry tag. Retired values
+remain reserved.
 
 ## Changing a Deno host-object payload
 
-For example, `ImageData` writes a Deno-defined payload after its
-`StructuredCloneHostObjectTag::ImageData` byte. Increment the Deno wire version
-when changing an existing tag's payload would make a current decoder interpret a
-valid older payload differently. Then do all of the following:
+For example, `ImageData` writes a Deno-defined payload after its registered
+`ImageData` tag byte. Increment the Deno wire version when changing an existing
+tag's payload would make a current decoder interpret a valid older payload
+differently. Then do all of the following:
 
 1. Increment `STRUCTURED_CLONE_WIRE_FORMAT_VERSION`.
 2. Add a decoder branch for the previous version in the host object's

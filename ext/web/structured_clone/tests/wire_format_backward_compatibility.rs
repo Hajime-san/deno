@@ -7,7 +7,7 @@ use deno_core::RuntimeOptions;
 use deno_core::is_structured_clone_host_object;
 use deno_core::v8;
 
-use super::WebStructuredCloneHostObjectRegistry;
+use super::create_web_structured_clone_registry;
 use crate::image_data::ImageData;
 
 fn runtime() -> JsRuntime {
@@ -78,7 +78,7 @@ fn image_data_v1_wire_format() {
     .unwrap();
 
   deno_core::scope!(scope, runtime);
-  let registry = WebStructuredCloneHostObjectRegistry::default();
+  let registry = create_web_structured_clone_registry();
   let value = deno_core::v8::Local::new(scope, value);
   let bytes =
     deno_core::structured_serialize_internal(scope, value, false, &registry)
@@ -92,7 +92,7 @@ fn decodes_image_data_v1_fixture() {
 
   deno_core::scope!(scope, runtime);
   let context = scope.get_current_context();
-  let registry = WebStructuredCloneHostObjectRegistry::default();
+  let registry = create_web_structured_clone_registry();
   let value = deno_core::structured_deserialize(
     scope,
     IMAGE_DATA_V1_V8_16.to_vec(),

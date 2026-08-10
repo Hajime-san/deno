@@ -208,6 +208,8 @@ pub use crate::serialization::StructuredCloneDetached;
 pub use crate::serialization::StructuredCloneHostObject;
 pub use crate::serialization::StructuredCloneHostObjectRegistry;
 pub use crate::serialization::StructuredCloneHostObjectTag;
+pub use crate::serialization::StructuredCloneRegistry;
+pub use crate::serialization::StructuredCloneRegistryTransferData;
 pub use crate::serialization::StructuredCloneTransferData;
 pub use crate::serialization::StructuredCloneTransferable;
 pub use crate::serialization::StructuredDeserializeWithTransferResult;

@@ -1,6 +1,10 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
+use std::any::Any;
+use std::any::TypeId;
 use std::borrow::Cow;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 use deno_core::v8;
 use deno_core::v8::ValueDeserializerHelper;
@@ -341,6 +345,398 @@ pub trait StructuredCloneHostObjectRegistry {
     scope: &mut v8::PinScope<'s, 'i>,
     data: Self::TransferData,
   ) -> Result<v8::Local<'s, v8::Object>, JsErrorBox>;
+}
+
+type WriteHostObjectHandler = for<'s, 'i> fn(
+  &mut v8::PinScope<'s, 'i>,
+  v8::Local<'s, v8::Context>,
+  v8::Local<'s, v8::Object>,
+  &dyn v8::ValueSerializerHelper,
+) -> Option<bool>;
+
+type ReadHostObjectHandler =
+  for<'s, 'i> fn(
+    &mut v8::PinScope<'s, 'i>,
+    v8::Local<'s, v8::Context>,
+    &dyn v8::ValueDeserializerHelper,
+    u32,
+  ) -> Option<v8::Local<'s, v8::Object>>;
+
+type WasDetachedHandler = for<'s, 'i> fn(
+  &mut v8::PinScope<'s, 'i>,
+  v8::Local<'s, v8::Object>,
+) -> Result<bool, JsErrorBox>;
+
+type TransferHostObjectHandler =
+  for<'s, 'i> fn(
+    &mut v8::PinScope<'s, 'i>,
+    v8::Local<'s, v8::Object>,
+  ) -> Result<StructuredCloneRegistryTransferData, JsErrorBox>;
+
+type DetachHostObjectHandler = for<'s, 'i> fn(
+  &mut v8::PinScope<'s, 'i>,
+  v8::Local<'s, v8::Object>,
+) -> Result<(), JsErrorBox>;
+
+type ReceiveTransferHandler =
+  for<'s, 'i> fn(
+    &mut v8::PinScope<'s, 'i>,
+    Box<dyn Any>,
+  ) -> Result<v8::Local<'s, v8::Object>, JsErrorBox>;
+
+type TypeMatchHandler =
+  for<'s> fn(&mut v8::Isolate, v8::Local<'s, v8::Object>) -> bool;
+
+#[derive(Clone, Copy)]
+struct SerializableHandler {
+  tag: u8,
+  write: WriteHostObjectHandler,
+  read: ReadHostObjectHandler,
+}
+
+#[derive(Clone, Copy)]
+struct TransferableHandler {
+  tag: u8,
+  transfer: TransferHostObjectHandler,
+}
+
+#[derive(Clone, Copy)]
+struct DetachedHandler {
+  was_detached: WasDetachedHandler,
+  detach: DetachHostObjectHandler,
+}
+
+#[derive(Clone, Copy)]
+struct HostObjectHandler {
+  matches: TypeMatchHandler,
+  detached: Option<DetachedHandler>,
+  serializable: Option<SerializableHandler>,
+  transferable: Option<TransferableHandler>,
+}
+
+#[derive(Clone, Copy)]
+enum HostObjectTagHandler {
+  Serialized(ReadHostObjectHandler),
+  Transferred(TypeMatchHandler),
+}
+
+const HOST_OBJECT_TAG_COUNT: usize = u8::MAX as usize + 1;
+
+#[derive(Clone)]
+struct StructuredCloneRegistryInner {
+  handlers_by_tag: [Option<HostObjectTagHandler>; HOST_OBJECT_TAG_COUNT],
+  // TODO: Replace TypeId dispatch with stable Web IDL interface descriptors
+  // once Deno has descriptor-based typed unwrap and inheritance support.
+  handlers_by_type: HashMap<TypeId, HostObjectHandler>,
+}
+
+/// Registry for platform objects participating in structured cloning.
+///
+/// Wire tags are permanent identifiers. Callers must not renumber or reuse a
+/// tag after its format has shipped.
+#[derive(Clone)]
+pub struct StructuredCloneRegistry {
+  inner: Arc<StructuredCloneRegistryInner>,
+}
+
+impl Default for StructuredCloneRegistry {
+  fn default() -> Self {
+    Self::new()
+  }
+}
+
+impl StructuredCloneRegistry {
+  pub fn new() -> Self {
+    Self {
+      inner: Arc::new(StructuredCloneRegistryInner {
+        handlers_by_tag: [None; HOST_OBJECT_TAG_COUNT],
+        handlers_by_type: HashMap::new(),
+      }),
+    }
+  }
+
+  fn register_handler<T: 'static>(&mut self, handler: HostObjectHandler) {
+    let inner = Arc::make_mut(&mut self.inner);
+    assert!(
+      inner
+        .handlers_by_type
+        .insert(TypeId::of::<T>(), handler)
+        .is_none(),
+      "structured clone type registered twice"
+    );
+    if let Some(serializable) = handler.serializable {
+      assert!(
+        inner.handlers_by_tag[serializable.tag as usize]
+          .replace(HostObjectTagHandler::Serialized(serializable.read))
+          .is_none(),
+        "structured clone tag registered twice"
+      );
+    }
+    if let Some(transferable) = handler.transferable {
+      assert!(
+        inner.handlers_by_tag[transferable.tag as usize]
+          .replace(HostObjectTagHandler::Transferred(handler.matches))
+          .is_none(),
+        "structured clone tag registered twice"
+      );
+    }
+  }
+
+  pub fn register_serializable<T: StructuredCloneHostObject>(
+    &mut self,
+    tag: u8,
+  ) {
+    self.register_handler::<T>(HostObjectHandler {
+      matches: registered_type_matches::<T>,
+      detached: None,
+      serializable: Some(SerializableHandler {
+        tag,
+        write: write_structured_clone_host_object::<T>,
+        read: read_structured_clone_host_object::<T>,
+      }),
+      transferable: None,
+    });
+  }
+
+  pub fn register_transferable<T: StructuredCloneTransferable>(
+    &mut self,
+    tag: u8,
+  ) {
+    self.register_handler::<T>(HostObjectHandler {
+      matches: registered_type_matches::<T>,
+      detached: Some(DetachedHandler {
+        was_detached: structured_clone_object_was_detached::<T>,
+        detach: detach_structured_clone_object::<T>,
+      }),
+      serializable: None,
+      transferable: Some(TransferableHandler {
+        tag,
+        transfer: transfer_registered_host_object::<T>,
+      }),
+    });
+  }
+
+  pub fn register_serializable_transferable<
+    T: StructuredCloneHostObject + StructuredCloneTransferable,
+  >(
+    &mut self,
+    serialized_tag: u8,
+    transferred_tag: u8,
+  ) {
+    self.register_handler::<T>(HostObjectHandler {
+      matches: registered_type_matches::<T>,
+      detached: Some(DetachedHandler {
+        was_detached: structured_clone_object_was_detached::<T>,
+        detach: detach_structured_clone_object::<T>,
+      }),
+      serializable: Some(SerializableHandler {
+        tag: serialized_tag,
+        write: write_structured_clone_host_object::<T>,
+        read: read_structured_clone_host_object::<T>,
+      }),
+      transferable: Some(TransferableHandler {
+        tag: transferred_tag,
+        transfer: transfer_registered_host_object::<T>,
+      }),
+    });
+  }
+}
+
+pub struct StructuredCloneRegistryTransferData {
+  receive: ReceiveTransferHandler,
+  data: Box<dyn Any>,
+}
+
+fn registered_type_matches<T: GarbageCollected + 'static>(
+  scope: &mut v8::Isolate,
+  object: v8::Local<v8::Object>,
+) -> bool {
+  crate::cppgc::try_unwrap_cppgc_object::<T>(scope, object.into()).is_some()
+}
+
+fn registered_host_object_type_id(
+  registry: &StructuredCloneRegistry,
+  scope: &mut v8::Isolate,
+  object: v8::Local<v8::Object>,
+) -> Option<TypeId> {
+  registry
+    .inner
+    .handlers_by_type
+    .iter()
+    .find_map(|(type_id, handler)| {
+      (handler.matches)(scope, object).then_some(*type_id)
+    })
+}
+
+fn transfer_registered_host_object<'s, 'i, T: StructuredCloneTransferable>(
+  scope: &mut v8::PinScope<'s, 'i>,
+  object: v8::Local<'s, v8::Object>,
+) -> Result<StructuredCloneRegistryTransferData, JsErrorBox> {
+  Ok(StructuredCloneRegistryTransferData {
+    receive: receive_registered_host_object::<T>,
+    data: Box::new(transfer_structured_clone_host_object::<T>(scope, object)?),
+  })
+}
+
+fn receive_registered_host_object<'s, 'i, T: StructuredCloneTransferable>(
+  scope: &mut v8::PinScope<'s, 'i>,
+  data: Box<dyn Any>,
+) -> Result<v8::Local<'s, v8::Object>, JsErrorBox> {
+  let data = data
+    .downcast::<T::TransferData>()
+    .map_err(|_| data_clone_error("Transfer data has an unexpected type"))?;
+  receive_structured_clone_host_object::<T>(scope, *data)
+}
+
+fn host_object_not_transferable() -> JsErrorBox {
+  data_clone_error("Host object is not transferable")
+}
+
+impl StructuredCloneHostObjectRegistry for StructuredCloneRegistry {
+  type TransferData = StructuredCloneRegistryTransferData;
+
+  fn wire_format_version(&self) -> u32 {
+    STRUCTURED_CLONE_WIRE_FORMAT_VERSION
+  }
+
+  fn is_host_object<'s, 'i>(
+    &self,
+    scope: &mut v8::PinScope<'s, 'i>,
+    object: v8::Local<'s, v8::Object>,
+  ) -> bool {
+    registered_host_object_type_id(self, scope, object).is_some()
+  }
+
+  fn write_host_object<'s, 'i>(
+    &self,
+    scope: &mut v8::PinScope<'s, 'i>,
+    context: v8::Local<'s, v8::Context>,
+    object: v8::Local<'s, v8::Object>,
+    transfer_id: Option<u32>,
+    serializer: &dyn v8::ValueSerializerHelper,
+  ) -> Option<bool> {
+    let type_id = registered_host_object_type_id(self, scope, object)?;
+    let handler = self.inner.handlers_by_type.get(&type_id)?;
+    if let Some(transfer_id) = transfer_id {
+      let transferable = handler.transferable?;
+      serializer.write_raw_bytes(&[transferable.tag]);
+      serializer.write_uint32(transfer_id);
+      return Some(true);
+    }
+    let serializable = handler.serializable?;
+    if let Some(detached) = handler.detached
+      && (detached.was_detached)(scope, object).ok()?
+    {
+      let message =
+        v8::String::new(scope, "Cannot serialize a detached platform object")?;
+      let error = v8::Exception::error(scope, message);
+      scope.throw_exception(error);
+      return None;
+    }
+    serializer.write_raw_bytes(&[serializable.tag]);
+    (serializable.write)(scope, context, object, serializer)
+  }
+
+  fn read_host_object<'s, 'i>(
+    &self,
+    scope: &mut v8::PinScope<'s, 'i>,
+    context: v8::Local<'s, v8::Context>,
+    deserializer: &dyn v8::ValueDeserializerHelper,
+    wire_format_version: u32,
+    transferred_host_objects: &[v8::Global<v8::Object>],
+  ) -> Option<v8::Local<'s, v8::Object>> {
+    let tag = *deserializer.read_raw_bytes(1)?.first()?;
+    match self.inner.handlers_by_tag[tag as usize]? {
+      HostObjectTagHandler::Serialized(read) => {
+        read(scope, context, deserializer, wire_format_version)
+      }
+      HostObjectTagHandler::Transferred(matches) => {
+        let mut transfer_id = 0;
+        if !deserializer.read_uint32(&mut transfer_id) {
+          return None;
+        }
+        let object = v8::Local::new(
+          scope,
+          transferred_host_objects.get(transfer_id as usize)?,
+        );
+        matches(scope, object).then_some(object)
+      }
+    }
+  }
+
+  fn is_transferable_host_object<'s, 'i>(
+    &self,
+    scope: &mut v8::PinScope<'s, 'i>,
+    object: v8::Local<'s, v8::Object>,
+  ) -> Result<bool, JsErrorBox> {
+    let Some(type_id) = registered_host_object_type_id(self, scope, object)
+    else {
+      return Ok(false);
+    };
+    Ok(
+      self
+        .inner
+        .handlers_by_type
+        .get(&type_id)
+        .is_some_and(|handler| handler.transferable.is_some()),
+    )
+  }
+
+  fn was_detached_host_object<'s, 'i>(
+    &self,
+    scope: &mut v8::PinScope<'s, 'i>,
+    object: v8::Local<'s, v8::Object>,
+  ) -> Result<bool, JsErrorBox> {
+    let type_id = registered_host_object_type_id(self, scope, object)
+      .ok_or_else(host_object_not_transferable)?;
+    let detached = self
+      .inner
+      .handlers_by_type
+      .get(&type_id)
+      .and_then(|handler| handler.detached)
+      .ok_or_else(host_object_not_transferable)?;
+    (detached.was_detached)(scope, object)
+  }
+
+  fn transfer_host_object<'s, 'i>(
+    &self,
+    scope: &mut v8::PinScope<'s, 'i>,
+    object: v8::Local<'s, v8::Object>,
+  ) -> Result<Self::TransferData, JsErrorBox> {
+    let type_id = registered_host_object_type_id(self, scope, object)
+      .ok_or_else(host_object_not_transferable)?;
+    let transferable = self
+      .inner
+      .handlers_by_type
+      .get(&type_id)
+      .and_then(|handler| handler.transferable)
+      .ok_or_else(host_object_not_transferable)?;
+    (transferable.transfer)(scope, object)
+  }
+
+  fn detach_host_object<'s, 'i>(
+    &self,
+    scope: &mut v8::PinScope<'s, 'i>,
+    object: v8::Local<'s, v8::Object>,
+  ) -> Result<(), JsErrorBox> {
+    let type_id = registered_host_object_type_id(self, scope, object)
+      .ok_or_else(host_object_not_transferable)?;
+    let detached = self
+      .inner
+      .handlers_by_type
+      .get(&type_id)
+      .and_then(|handler| handler.detached)
+      .ok_or_else(host_object_not_transferable)?;
+    (detached.detach)(scope, object)
+  }
+
+  fn receive_host_object<'s, 'i>(
+    &self,
+    scope: &mut v8::PinScope<'s, 'i>,
+    data: Self::TransferData,
+  ) -> Result<v8::Local<'s, v8::Object>, JsErrorBox> {
+    (data.receive)(scope, data.data)
+  }
 }
 
 // V8 owns reference tracking while it serializes a complete object graph.
@@ -873,7 +1269,28 @@ impl<'s> StructuredSerializeOptions<'s> {
 #[cfg(test)]
 mod tests {
   use super::EMBEDDER_ENVELOPE_TAG;
+  use super::StructuredCloneRegistry;
   use super::read_embedder_envelope;
+  use super::structured_deserialize;
+  use super::structured_serialize_internal;
+  use crate::JsRuntime;
+  use crate::v8;
+
+  #[test]
+  fn intermediate_serialization_encodes_primitives() {
+    let mut runtime = JsRuntime::new(Default::default());
+    deno_core::scope!(scope, runtime);
+    let registry = StructuredCloneRegistry::new();
+    let value: v8::Local<v8::Value> = v8::Integer::new(scope, 42).into();
+    let bytes =
+      structured_serialize_internal(scope, value, false, &registry).unwrap();
+
+    assert!(bytes.starts_with(&[EMBEDDER_ENVELOPE_TAG]));
+    let target_realm = scope.get_current_context();
+    let value =
+      structured_deserialize(scope, bytes, target_realm, &registry).unwrap();
+    assert_eq!(value.int32_value(scope), Some(42));
+  }
 
   #[test]
   fn reads_embedder_envelope() {
@@ -904,5 +1321,210 @@ mod tests {
     ]
     .concat();
     assert!(read_embedder_envelope(&invalid_version).is_err());
+  }
+}
+
+#[cfg(test)]
+mod registry_tests {
+  use std::cell::Cell;
+
+  use super::*;
+  use crate::JsRuntime;
+
+  struct TestTransferable {
+    value: u32,
+    detached: Cell<bool>,
+  }
+
+  // SAFETY: TestTransferable contains no references requiring GC tracing.
+  unsafe impl GarbageCollected for TestTransferable {
+    fn trace(&self, _visitor: &mut v8::cppgc::Visitor) {}
+
+    fn get_name(&self) -> &'static std::ffi::CStr {
+      c"TestTransferable"
+    }
+  }
+
+  impl WebIdlSerializable for TestTransferable {}
+  impl WebIdlTransferable for TestTransferable {}
+
+  impl StructuredCloneDetached for TestTransferable {
+    fn was_detached(&self) -> bool {
+      self.detached.get()
+    }
+
+    fn detach(&self) {
+      self.detached.set(true);
+    }
+  }
+
+  impl StructuredCloneTransferable for TestTransferable {
+    type TransferData = u32;
+
+    fn transfer<'s, 'i>(
+      &self,
+      _scope: &mut v8::PinScope<'s, 'i>,
+    ) -> Result<Self::TransferData, JsErrorBox> {
+      Ok(self.value)
+    }
+
+    fn receive<'s, 'i>(
+      _scope: &mut v8::PinScope<'s, 'i>,
+      value: Self::TransferData,
+    ) -> Result<Self, JsErrorBox> {
+      Ok(Self {
+        value,
+        detached: Cell::new(false),
+      })
+    }
+  }
+
+  impl StructuredCloneHostObject for TestTransferable {
+    fn write_structured_clone_payload<'s, 'i>(
+      &self,
+      _scope: &mut v8::PinScope<'s, 'i>,
+      _context: v8::Local<'s, v8::Context>,
+      serializer: &dyn v8::ValueSerializerHelper,
+    ) -> Option<bool> {
+      serializer.write_uint32(self.value);
+      Some(true)
+    }
+
+    fn read_structured_clone_payload<'s, 'i>(
+      _scope: &mut v8::PinScope<'s, 'i>,
+      _context: v8::Local<'s, v8::Context>,
+      deserializer: &dyn v8::ValueDeserializerHelper,
+      _wire_format_version: u32,
+    ) -> Option<Self> {
+      let mut value = 0;
+      deserializer.read_uint32(&mut value).then_some(Self {
+        value,
+        detached: Cell::new(false),
+      })
+    }
+  }
+
+  #[test]
+  fn resolves_host_object_transfer_reference() {
+    const SERIALIZABLE_TAG: u8 = b'}';
+    const TRANSFERABLE_TAG: u8 = b'~';
+
+    let mut runtime = JsRuntime::new(Default::default());
+    deno_core::scope!(scope, runtime);
+    let context = scope.get_current_context();
+    let mut registry = StructuredCloneRegistry::new();
+    registry.register_serializable_transferable::<TestTransferable>(
+      SERIALIZABLE_TAG,
+      TRANSFERABLE_TAG,
+    );
+    let first_source = crate::cppgc::make_cppgc_object(
+      scope,
+      TestTransferable {
+        value: 42,
+        detached: Cell::new(false),
+      },
+    );
+    let second_source = crate::cppgc::make_cppgc_object(
+      scope,
+      TestTransferable {
+        value: 43,
+        detached: Cell::new(false),
+      },
+    );
+    let graph = v8::Object::new(scope);
+    let first_key = v8::String::new(scope, "first").unwrap();
+    let alias_key = v8::String::new(scope, "alias").unwrap();
+    let second_key = v8::String::new(scope, "second").unwrap();
+    assert_eq!(
+      graph.set(scope, first_key.into(), first_source.into()),
+      Some(true)
+    );
+    assert_eq!(
+      graph.set(scope, alias_key.into(), first_source.into()),
+      Some(true)
+    );
+    assert_eq!(
+      graph.set(scope, second_key.into(), second_source.into()),
+      Some(true)
+    );
+
+    let serialized = structured_serialize_internal(
+      scope,
+      first_source.into(),
+      false,
+      &registry,
+    )
+    .unwrap();
+    let cloned = structured_deserialize(scope, serialized, context, &registry)
+      .unwrap()
+      .try_cast::<v8::Object>()
+      .unwrap();
+    let cloned_value =
+      crate::cppgc::try_unwrap_cppgc_object::<TestTransferable>(
+        scope,
+        cloned.into(),
+      )
+      .unwrap();
+    assert_eq!(cloned_value.value, 42);
+    assert!(!cloned_value.detached.get());
+
+    let result = structured_serialize_with_transfer(
+      scope,
+      graph.into(),
+      &[first_source.into(), second_source.into()],
+      &registry,
+    )
+    .unwrap();
+    for source in [first_source, second_source] {
+      let source_value = crate::cppgc::try_unwrap_cppgc_object::<
+        TestTransferable,
+      >(scope, source.into())
+      .unwrap();
+      assert!(source_value.detached.get());
+    }
+    {
+      v8::tc_scope!(let tc_scope, scope);
+      let serialized = structured_serialize_internal(
+        tc_scope,
+        first_source.into(),
+        false,
+        &registry,
+      )
+      .unwrap();
+      assert!(serialized.is_empty());
+      assert!(tc_scope.has_caught());
+    }
+    let null = v8::null(scope);
+    assert!(
+      structured_serialize_with_transfer(
+        scope,
+        null.into(),
+        &[first_source.into()],
+        &registry,
+      )
+      .is_err()
+    );
+
+    let result =
+      structured_deserialize_with_transfer(scope, result, context, &registry)
+        .unwrap();
+    assert_eq!(result.transferred_values.len(), 2);
+    let cloned_graph = result.deserialized.try_cast::<v8::Object>().unwrap();
+    for (key, transfer_id, expected) in
+      [(first_key, 0, 42), (alias_key, 0, 42), (second_key, 1, 43)]
+    {
+      let cloned = cloned_graph
+        .get(scope, key.into())
+        .unwrap()
+        .try_cast::<v8::Object>()
+        .unwrap();
+      assert_eq!(cloned, result.transferred_values[transfer_id]);
+      let cloned_value = crate::cppgc::try_unwrap_cppgc_object::<
+        TestTransferable,
+      >(scope, cloned.into())
+      .unwrap();
+      assert_eq!(cloned_value.value, expected);
+      assert!(!cloned_value.detached.get());
+    }
   }
 }
