@@ -433,7 +433,12 @@ where
   }
 }
 
-// https://html.spec.whatwg.org/multipage/structured-data.html#structuredserializeinternal
+/// Not a few operation is handled by V8 side.
+/// https://source.chromium.org/chromium/chromium/src/+/main:v8/src/objects/value-serializer.cc
+/// This abstract operation needs recursible. So almost operation should
+/// delegate to [`v8::ValueSerializerImpl`]
+///
+/// https://html.spec.whatwg.org/multipage/structured-data.html#structuredserializeinternal
 pub fn structured_serialize_internal<'s, 'i, R>(
   scope: &mut v8::PinScope<'s, 'i>,
   value: v8::Local<'s, v8::Value>,
@@ -467,11 +472,6 @@ fn structured_serialize_internal_with_transfers<'s, 'i, R>(
 where
   R: StructuredCloneHostObjectRegistry,
 {
-  // 5. If value is a Symbol, then throw a "DataCloneError" DOMException.
-  if value.is_symbol() {
-    return Err(JsErrorBox::new("DataCloneError", "Cannot serialize Symbol"));
-  }
-
   // TODO: Need to check accurate
   // V8 owns the recursive object graph traversal, including reference tracking
   // for aliases and cycles. Always produce owned bytes at this intermediate
