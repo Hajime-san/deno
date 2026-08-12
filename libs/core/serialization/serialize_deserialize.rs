@@ -736,6 +736,11 @@ impl StructuredCloneHostObjectRegistry for StructuredCloneRegistry {
     scope: &mut v8::PinScope<'s, 'i>,
     data: Self::TransferData,
   ) -> Result<v8::Local<'s, v8::Object>, JsErrorBox> {
+    // TODO:
+    // 4.2. If the interface identified by interfaceName is not exposed in targetRealm,
+    // then throw a "DataCloneError" DOMException.
+    // https://html.spec.whatwg.org/multipage/structured-data.html#structureddeserializewithtransfer
+    // https://source.chromium.org/chromium/chromium/src/+/main:third_party/blink/renderer/bindings/core/v8/serialization/v8_script_value_deserializer.cc;l=1041-1120?q=ExecutionContextExposesInterface&ss=chromium%2Fchromium%2Fsrc
     (data.receive)(scope, data.data)
   }
 }
@@ -881,6 +886,38 @@ where
       self.wire_format_version,
       &self.transferred_host_objects,
     )
+  }
+
+  fn get_shared_array_buffer_from_id<'s>(
+    &self,
+    scope: &mut v8::PinScope<'s, '_>,
+    transfer_id: u32,
+  ) -> Option<v8::Local<'s, v8::SharedArrayBuffer>> {
+    let state = JsRuntime::state_from(scope);
+    match &state.shared_array_buffer_store {
+      Some(shared_array_buffer_store) => {
+        let backing_store = shared_array_buffer_store.take(transfer_id)?;
+        let shared_array_buffer =
+          v8::SharedArrayBuffer::with_backing_store(scope, &backing_store);
+        Some(shared_array_buffer)
+      }
+      _ => None,
+    }
+  }
+
+  fn get_wasm_module_from_id<'s>(
+    &self,
+    scope: &mut v8::PinScope<'s, '_>,
+    clone_id: u32,
+  ) -> Option<v8::Local<'s, v8::WasmModuleObject>> {
+    let state = JsRuntime::state_from(scope);
+    match &state.compiled_wasm_module_store {
+      Some(compiled_wasm_module_store) => {
+        let compiled_module = compiled_wasm_module_store.take(clone_id)?;
+        v8::WasmModuleObject::from_compiled_module(scope, &compiled_module)
+      }
+      _ => None,
+    }
   }
 }
 
@@ -1162,13 +1199,17 @@ pub fn structured_deserialize_with_transfer<'s, 'i, R>(
 where
   R: StructuredCloneHostObjectRegistry,
 {
+  // 2.
   let mut transferred_values =
     Vec::with_capacity(result.transfer_data_holders.len());
   let mut transferred_array_buffers = Vec::new();
   let mut transferred_host_objects = Vec::new();
 
+  // 3.
   for holder in result.transfer_data_holders {
     match holder {
+      // 2.
+      // 3.
       StructuredCloneTransferData::ArrayBuffer(backing_store) => {
         let array_buffer =
           v8::ArrayBuffer::with_backing_store(scope, &backing_store);
@@ -1176,6 +1217,7 @@ where
         transferred_array_buffers.push((transfer_id, array_buffer));
         transferred_values.push(array_buffer.into());
       }
+      // 4.
       StructuredCloneTransferData::HostObject(data) => {
         let object = host_objects.receive_host_object(scope, data)?;
         transferred_host_objects.push(object);
@@ -1184,6 +1226,7 @@ where
     }
   }
 
+  // 4.
   let deserialized = deserialize_v8_graph(
     scope,
     target_realm,
