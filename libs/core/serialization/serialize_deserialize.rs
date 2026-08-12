@@ -1,5 +1,27 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
+//! The base internal inplementation of structuredClone, which are
+//! StructuredSerializeInternal/StructuredDeserialize
+//! StructuredSerializeWithTransfer/StructuredDeserializeWithTransfer
+//! does not correspond one-to-one with the steps in the WHATWG spec.
+//!
+//! Recursive serialization and deserialization of ECMAScript built-in object
+//! graphs is delegated to [v8::ValueSerializer] and [v8::ValueDeserializer]. This
+//! preserves cycles, shared references, and V8's representation of built-ins
+//! such as Array, Map, Set, Date, and more.
+//!
+//! Deno should implements platform(host) objects that V8 does not know about.
+//! It includes Web platform objects such as Blob is [Serializable] or
+//! OffscreenCanvas is [Transferable].
+//! Delegates implementing [v8::ValueSerializerImpl] and [v8::ValueDeserializerImpl]
+//! detect, serialize, and deserialize these platform objects within an object graph.
+//!
+//! TODO: do not needed to document
+//! Transfer list validation, transferability checks, ownership transfer, and
+//! detachment belong to the outer implementation of WHATWG
+//! StructuredSerializeWithTransfer. The V8 serializer receives the transfer
+//! state prepared by that layer.
+
 use std::any::Any;
 use std::any::TypeId;
 use std::borrow::Cow;
@@ -11,33 +33,12 @@ use deno_core::v8::ValueDeserializerHelper;
 use deno_core::v8::ValueSerializerHelper;
 use deno_error::JsErrorBox;
 
+use crate::JsRuntime;
 use crate::cppgc::GarbageCollected;
 use crate::webidl::ContextFn;
 use crate::webidl::WebIdlConverter;
 use crate::webidl::WebIdlError;
 use crate::webidl::WebIdlErrorKind;
-
-// The base internal inplementation of structuredClone, which are
-// StructuredSerializeInternal/StructuredDeserialize
-// StructuredSerializeWithTransfer/StructuredDeserializeWithTransfer
-// does not correspond one-to-one with the steps in the WHATWG spec.
-//
-// Recursive serialization and deserialization of ECMAScript built-in object
-// graphs is delegated to V8's ValueSerializer and ValueDeserializer. This
-// preserves cycles, shared references, and V8's representation of built-ins
-// such as Array, Map, Set, Date, and more.
-//
-// Deno should implements platform(host) objects that V8 does not know about.
-// It includes Web platform objects such as Blob is [Serializable] or
-// OffscreenCanvas is [Transferable].
-// Delegates implementing v8::ValueSerializerImpl and v8::ValueDeserializerImpl
-// detect, serialize, and deserialize these platform objects within an object graph.
-//
-// TODO: do not needed to document
-// Transfer list validation, transferability checks, ownership transfer, and
-// detachment belong to the outer implementation of WHATWG
-// StructuredSerializeWithTransfer. The V8 serializer receives the transfer
-// state prepared by that layer.
 
 pub enum StructuredCloneTransferData<T> {
   ArrayBuffer(v8::SharedRef<v8::BackingStore>),
@@ -742,7 +743,7 @@ impl StructuredCloneHostObjectRegistry for StructuredCloneRegistry {
 // V8 owns reference tracking while it serializes a complete object graph.
 // Keep Web(Deno) platform specific state here as support is added.
 struct V8SerializerDelegate<'a, R> {
-  _for_storage: bool,
+  for_storage: bool,
   host_objects: &'a R,
   // Nested host-object values must use the context selected by the caller,
   // not whichever context happens to be current during a V8 callback.
@@ -767,6 +768,7 @@ where
   }
 
   fn has_custom_host_object(&self, _isolate: &v8::Isolate) -> bool {
+    // TODO: check collectness
     true
   }
 
@@ -799,11 +801,64 @@ where
       serializer,
     )
   }
+
+  // https://source.chromium.org/chromium/chromium/src/+/main:third_party/blink/renderer/bindings/core/v8/serialization/v8_script_value_serializer.cc;l=1023
+  fn get_shared_array_buffer_id<'s>(
+    &self,
+    scope: &mut v8::PinScope<'s, '_>,
+    shared_array_buffer: v8::Local<'s, v8::SharedArrayBuffer>,
+  ) -> Option<u32> {
+    // https://html.spec.whatwg.org/multipage/structured-data.html#structuredserializeinternal
+    // 13.1.1.2.
+    if self.for_storage {
+      let message = v8::String::new(scope, "A SharedArrayBuffer can not be serialized for storage.")?;
+      self.throw_data_clone_error(scope, message);
+      return None;
+    }
+
+    // https://source.chromium.org/chromium/chromium/src/+/main:v8/include/v8-value-serializer.h;l=101-110
+    let state = JsRuntime::state_from(scope);
+    match &state.shared_array_buffer_store {
+      Some(shared_array_buffer_store) => {
+        let backing_store = shared_array_buffer.get_backing_store();
+        let id = shared_array_buffer_store.insert(backing_store);
+        Some(id)
+      }
+      // A DataCloneError is not thrown since the value cannot be None in the current implementation.
+      _ => None,
+    }
+  }
+
+  // https://source.chromium.org/chromium/chromium/src/+/main:third_party/blink/renderer/bindings/core/v8/serialization/v8_script_value_serializer.cc;l=1061
+  fn get_wasm_module_transfer_id(
+    &self,
+    scope: &mut v8::PinScope<'_, '_>,
+    module: v8::Local<v8::WasmModuleObject>,
+  ) -> Option<u32> {
+    // https://html.spec.whatwg.org/multipage/structured-data.html#structuredserializeinternal
+    // 13.1.1.2.
+    if self.for_storage {
+      let message = v8::String::new(scope, "A WebAssembly.Module can not be serialized for storage.")?;
+      self.throw_data_clone_error(scope, message);
+      return None;
+    }
+
+    let state = JsRuntime::state_from(scope);
+    match &state.compiled_wasm_module_store {
+      Some(compiled_wasm_module_store) => {
+        let compiled_wasm_module = module.get_compiled_module();
+        let id = compiled_wasm_module_store.insert(compiled_wasm_module);
+        Some(id)
+      }
+      // A DataCloneError is not thrown since the value cannot be None in the current implementation.
+      _ => None,
+    }
+  }
 }
 
 struct V8DeserializerDelegate<'a, R> {
   host_objects: &'a R,
-  // Explicit target realm for nested host-object values.
+  /// Explicit target realm([v8::Context]) for nested host-object values.
   target_realm: v8::Global<v8::Context>,
   wire_format_version: u32,
   transferred_host_objects: Vec<v8::Global<v8::Object>>,
@@ -1054,7 +1109,7 @@ where
   let serializer = v8::ValueSerializer::new(
     scope,
     Box::new(V8SerializerDelegate {
-      _for_storage: for_storage,
+      for_storage,
       host_objects,
       context: v8::Global::new(scope, context),
       transferred_host_object_ids: v8::Global::new(
