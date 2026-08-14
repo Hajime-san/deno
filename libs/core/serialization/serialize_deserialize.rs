@@ -949,43 +949,7 @@ where
   R: StructuredCloneHostObjectRegistry,
 {
   let context = scope.get_current_context();
-  structured_serialize_internal_with_transfers(
-    scope,
-    context,
-    value,
-    for_storage,
-    host_objects,
-    &[],
-    &[],
-  )
-}
-
-fn structured_serialize_internal_with_transfers<'s, 'i, R>(
-  scope: &mut v8::PinScope<'s, 'i>,
-  context: v8::Local<'s, v8::Context>,
-  value: v8::Local<'s, v8::Value>,
-  for_storage: bool,
-  host_objects: &R,
-  transferred_array_buffers: &[(u32, v8::Local<'s, v8::ArrayBuffer>)],
-  transferred_host_objects: &[v8::Local<'s, v8::Object>],
-) -> Result<Vec<u8>, JsErrorBox>
-where
-  R: StructuredCloneHostObjectRegistry,
-{
-  // TODO: Need to check accurate
-  // V8 owns the recursive object graph traversal, including reference tracking
-  // for aliases and cycles. Always produce owned bytes at this intermediate
-  // layer so the result can be persisted or moved to another isolate. Callers
-  // such as structuredClone may optimize primitives before reaching here.
-  serialize_v8_graph(
-    scope,
-    context,
-    value,
-    for_storage,
-    host_objects,
-    transferred_array_buffers,
-    transferred_host_objects,
-  )
+  serialize_v8_graph(scope, context, value, for_storage, host_objects, &[], &[])
 }
 
 enum PreparedTransfer<'s> {
@@ -1073,7 +1037,7 @@ where
   }
 
   // 3.
-  let serialized = structured_serialize_internal_with_transfers(
+  let serialized = serialize_v8_graph(
     scope,
     context,
     value,
@@ -1143,6 +1107,11 @@ where
   })
 }
 
+// TODO: Need to check accurate
+// V8 owns the recursive object graph traversal, including reference tracking
+// for aliases and cycles. Always produce owned bytes at this intermediate
+// layer so the result can be persisted or moved to another isolate. Callers
+// such as structuredClone may optimize primitives before reaching here.
 fn serialize_v8_graph<'s, 'i, R>(
   scope: &mut v8::PinScope<'s, 'i>,
   context: v8::Local<'s, v8::Context>,
@@ -1225,6 +1194,18 @@ pub fn structured_deserialize_with_transfer<'s, 'i, R>(
 where
   R: StructuredCloneHostObjectRegistry,
 {
+  if result.transfer_data_holders.is_empty() {
+    return Ok(StructuredDeserializeWithTransferResult {
+      deserialized: structured_deserialize(
+        scope,
+        result.serialized,
+        target_realm,
+        host_objects,
+      )?,
+      transferred_values: Vec::new(),
+    });
+  }
+
   // 2.
   let mut transferred_values =
     Vec::with_capacity(result.transfer_data_holders.len());
