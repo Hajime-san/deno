@@ -755,8 +755,9 @@ struct V8SerializerDelegate<'a, R> {
   context: v8::Global<v8::Context>,
   // V8 Map provides identity-based lookup that remains valid if V8 moves an
   // object. Do not key a Rust HashMap by Object::get_identity_hash alone: V8
-  // explicitly does not guarantee that those hashes are unique.
-  transferred_host_object_ids: v8::Global<v8::Map>,
+  // explicitly does not guarantee that those hashes are unique. The map is
+  // absent when no host objects are transferred.
+  transferred_host_object_ids: Option<v8::Global<v8::Map>>,
 }
 
 impl<R> v8::ValueSerializerImpl for V8SerializerDelegate<'_, R>
@@ -792,12 +793,17 @@ where
     serializer: &dyn v8::ValueSerializerHelper,
   ) -> Option<bool> {
     let context = v8::Local::new(scope, &self.context);
-    let transferred_host_object_ids =
-      v8::Local::new(scope, &self.transferred_host_object_ids);
-    let transfer_id = transferred_host_object_ids
-      .get(scope, object.into())
-      .and_then(|value| value.try_cast::<v8::Uint32>().ok())
-      .map(|value| value.value());
+    let transfer_id = self.transferred_host_object_ids.as_ref().and_then(
+      |transferred_host_object_ids| {
+        let transferred_host_object_ids =
+          v8::Local::new(scope, transferred_host_object_ids);
+
+        transferred_host_object_ids
+          .get(scope, object.into())
+          .and_then(|value| value.try_cast::<v8::Uint32>().ok())
+          .map(|value| value.value())
+      },
+    );
     self.host_objects.write_host_object(
       scope,
       context,
@@ -816,7 +822,10 @@ where
     // https://html.spec.whatwg.org/multipage/structured-data.html#structuredserializeinternal
     // 13.1.1.2.
     if self.for_storage {
-      let message = v8::String::new(scope, "A SharedArrayBuffer can not be serialized for storage.")?;
+      let message = v8::String::new(
+        scope,
+        "A SharedArrayBuffer can not be serialized for storage.",
+      )?;
       self.throw_data_clone_error(scope, message);
       return None;
     }
@@ -843,7 +852,10 @@ where
     // https://html.spec.whatwg.org/multipage/structured-data.html#structuredserializeinternal
     // 13.1.1.2.
     if self.for_storage {
-      let message = v8::String::new(scope, "A WebAssembly.Module can not be serialized for storage.")?;
+      let message = v8::String::new(
+        scope,
+        "A WebAssembly.Module can not be serialized for storage.",
+      )?;
       self.throw_data_clone_error(scope, message);
       return None;
     }
@@ -1004,6 +1016,18 @@ pub fn structured_serialize_with_transfer<'s, 'i, R>(
 where
   R: StructuredCloneHostObjectRegistry,
 {
+  if transfer_list.is_empty() {
+    return Ok(StructuredSerializeWithTransferResult {
+      serialized: structured_serialize_internal(
+        scope,
+        value,
+        false,
+        host_objects,
+      )?,
+      transfer_data_holders: Vec::new(),
+    });
+  }
+
   let context = scope.get_current_context();
   let mut prepared = Vec::with_capacity(transfer_list.len());
   let mut transferred_array_buffers = Vec::new();
@@ -1131,28 +1155,30 @@ fn serialize_v8_graph<'s, 'i, R>(
 where
   R: StructuredCloneHostObjectRegistry,
 {
-  let transferred_host_object_ids = v8::Map::new(scope);
-  for (transfer_id, object) in transferred_host_objects.iter().enumerate() {
-    let transfer_id = u32::try_from(transfer_id)
-      .map_err(|_| data_clone_error("Too many host objects to transfer"))?;
-    let transfer_id = v8::Integer::new_from_unsigned(scope, transfer_id);
-    if transferred_host_object_ids
-      .set(scope, (*object).into(), transfer_id.into())
-      .is_none()
-    {
-      return Err(data_clone_error("Cannot index host object transfer"));
+  let transferred_host_object_ids = if transferred_host_objects.is_empty() {
+    None
+  } else {
+    let transferred_host_object_ids = v8::Map::new(scope);
+    for (transfer_id, object) in transferred_host_objects.iter().enumerate() {
+      let transfer_id = u32::try_from(transfer_id)
+        .map_err(|_| data_clone_error("Too many host objects to transfer"))?;
+      let transfer_id = v8::Integer::new_from_unsigned(scope, transfer_id);
+      if transferred_host_object_ids
+        .set(scope, (*object).into(), transfer_id.into())
+        .is_none()
+      {
+        return Err(data_clone_error("Cannot index host object transfer"));
+      }
     }
-  }
+    Some(v8::Global::new(scope, transferred_host_object_ids))
+  };
   let serializer = v8::ValueSerializer::new(
     scope,
     Box::new(V8SerializerDelegate {
       for_storage,
       host_objects,
       context: v8::Global::new(scope, context),
-      transferred_host_object_ids: v8::Global::new(
-        scope,
-        transferred_host_object_ids,
-      ),
+      transferred_host_object_ids,
     }),
   );
   serializer.write_raw_bytes(&[EMBEDDER_ENVELOPE_TAG]);
