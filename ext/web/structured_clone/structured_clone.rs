@@ -22,9 +22,8 @@ use crate::image_data::ImageData;
 #[cfg(test)]
 fn create_web_structured_clone_registry() -> StructuredCloneRegistry {
   let mut registry = StructuredCloneRegistry::new();
-  registry.register_serializable::<ImageData>(
-    SerializationTag::ImageData as u8,
-  );
+  registry
+    .register_serializable::<ImageData>(SerializationTag::ImageData as u8);
   registry
 }
 

@@ -4,6 +4,7 @@ use std::borrow::Cow;
 
 use deno_core::GarbageCollected;
 use deno_core::StructuredCloneHostObject;
+use deno_core::StructuredCloneSerializable;
 use deno_core::WebIDL;
 use deno_core::op2;
 use deno_core::v8;
@@ -203,6 +204,16 @@ impl ImageDataSerializationTag {
 }
 
 impl StructuredCloneHostObject for ImageData {
+  fn is_exposed<'s, 'i>(
+    _scope: &mut v8::PinScope<'s, 'i>,
+    _target_realm: v8::Local<'s, v8::Context>,
+  ) -> bool {
+    // ImageData is exposed in both Window and Worker global scopes in Deno.
+    true
+  }
+}
+
+impl StructuredCloneSerializable for ImageData {
   fn write_structured_clone_payload<'s, 'i>(
     &self,
     scope: &mut v8::PinScope<'s, 'i>,

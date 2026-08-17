@@ -135,14 +135,25 @@ pub trait StructuredCloneDetached: GarbageCollected + 'static {
   fn detach(&self);
 }
 
+/// Common structured-clone behavior for a Web IDL platform object.
+pub trait StructuredCloneHostObject:
+  GarbageCollected + Sized + 'static
+{
+  /// Returns whether this interface is exposed in `target_realm`.
+  fn is_exposed<'s, 'i>(
+    scope: &mut v8::PinScope<'s, 'i>,
+    target_realm: v8::Local<'s, v8::Context>,
+  ) -> bool;
+}
+
 /// Serialization and deserialization steps for a Web IDL `[Serializable]`
 /// platform object.
 ///
 /// The wire tag is deliberately not part of this trait. Tags are maintained in
 /// one embedder-owned enum so duplicate discriminants are rejected at compile
 /// time and retired values remain reserved.
-pub trait StructuredCloneHostObject:
-  WebIdlSerializable + GarbageCollected + Sized + 'static
+pub trait StructuredCloneSerializable:
+  StructuredCloneHostObject + WebIdlSerializable
 {
   /// Spec sometimes outline a specific order of operations,
   /// however unless there are specific dependencies each other,
@@ -176,7 +187,11 @@ pub trait StructuredCloneHostObject:
 /// platform object. Transfer data is out-of-band and is never persisted in the
 /// structured-clone wire payload.
 pub trait StructuredCloneTransferable:
-  WebIdlTransferable + StructuredCloneDetached + Sized + 'static
+  StructuredCloneHostObject
+  + WebIdlTransferable
+  + StructuredCloneDetached
+  + Sized
+  + 'static
 {
   type TransferData: 'static;
 
@@ -202,7 +217,7 @@ pub fn is_structured_clone_host_object<'s, 'i, T: StructuredCloneHostObject>(
 pub fn write_structured_clone_host_object<
   's,
   'i,
-  T: StructuredCloneHostObject,
+  T: StructuredCloneSerializable,
 >(
   scope: &mut v8::PinScope<'s, 'i>,
   context: v8::Local<'s, v8::Context>,
@@ -218,7 +233,7 @@ pub fn write_structured_clone_host_object<
 pub fn read_structured_clone_host_object<
   's,
   'i,
-  T: StructuredCloneHostObject,
+  T: StructuredCloneSerializable,
 >(
   scope: &mut v8::PinScope<'s, 'i>,
   context: v8::Local<'s, v8::Context>,
@@ -351,9 +366,13 @@ pub trait StructuredCloneHostObjectRegistry {
   fn receive_host_object<'s, 'i>(
     &self,
     scope: &mut v8::PinScope<'s, 'i>,
+    target_realm: v8::Local<'s, v8::Context>,
     data: Self::TransferData,
   ) -> Result<v8::Local<'s, v8::Object>, JsErrorBox>;
 }
+
+type IsExposedHandler =
+  for<'s, 'i> fn(&mut v8::PinScope<'s, 'i>, v8::Local<'s, v8::Context>) -> bool;
 
 type WriteHostObjectHandler = for<'s, 'i> fn(
   &mut v8::PinScope<'s, 'i>,
@@ -417,6 +436,7 @@ struct DetachedHandler {
 #[derive(Clone, Copy)]
 struct HostObjectHandler {
   matches: TypeMatchHandler,
+  is_exposed: IsExposedHandler,
   detached: Option<DetachedHandler>,
   serializable: Option<SerializableHandler>,
   transferable: Option<TransferableHandler>,
@@ -424,8 +444,14 @@ struct HostObjectHandler {
 
 #[derive(Clone, Copy)]
 enum HostObjectTagHandler {
-  Serialized(ReadHostObjectHandler),
-  Transferred(TypeMatchHandler),
+  Serialized {
+    read: ReadHostObjectHandler,
+    is_exposed: IsExposedHandler,
+  },
+  Transferred {
+    matches: TypeMatchHandler,
+    is_exposed: IsExposedHandler,
+  },
 }
 
 const HOST_OBJECT_TAG_COUNT: usize = u8::MAX as usize + 1;
@@ -475,7 +501,10 @@ impl StructuredCloneRegistry {
     if let Some(serializable) = handler.serializable {
       assert!(
         inner.handlers_by_tag[serializable.tag as usize]
-          .replace(HostObjectTagHandler::Serialized(serializable.read))
+          .replace(HostObjectTagHandler::Serialized {
+            read: serializable.read,
+            is_exposed: handler.is_exposed,
+          })
           .is_none(),
         "structured clone tag registered twice"
       );
@@ -483,19 +512,23 @@ impl StructuredCloneRegistry {
     if let Some(transferable) = handler.transferable {
       assert!(
         inner.handlers_by_tag[transferable.tag as usize]
-          .replace(HostObjectTagHandler::Transferred(handler.matches))
+          .replace(HostObjectTagHandler::Transferred {
+            matches: handler.matches,
+            is_exposed: handler.is_exposed,
+          })
           .is_none(),
         "structured clone tag registered twice"
       );
     }
   }
 
-  pub fn register_serializable<T: StructuredCloneHostObject>(
+  pub fn register_serializable<T: StructuredCloneSerializable>(
     &mut self,
     tag: u8,
   ) {
     self.register_handler::<T>(HostObjectHandler {
       matches: registered_type_matches::<T>,
+      is_exposed: structured_clone_host_object_is_exposed::<T>,
       detached: None,
       serializable: Some(SerializableHandler {
         tag,
@@ -512,6 +545,7 @@ impl StructuredCloneRegistry {
   ) {
     self.register_handler::<T>(HostObjectHandler {
       matches: registered_type_matches::<T>,
+      is_exposed: structured_clone_host_object_is_exposed::<T>,
       detached: Some(DetachedHandler {
         was_detached: structured_clone_object_was_detached::<T>,
         detach: detach_structured_clone_object::<T>,
@@ -525,7 +559,7 @@ impl StructuredCloneRegistry {
   }
 
   pub fn register_serializable_transferable<
-    T: StructuredCloneHostObject + StructuredCloneTransferable,
+    T: StructuredCloneSerializable + StructuredCloneTransferable,
   >(
     &mut self,
     serialized_tag: u8,
@@ -533,6 +567,7 @@ impl StructuredCloneRegistry {
   ) {
     self.register_handler::<T>(HostObjectHandler {
       matches: registered_type_matches::<T>,
+      is_exposed: structured_clone_host_object_is_exposed::<T>,
       detached: Some(DetachedHandler {
         was_detached: structured_clone_object_was_detached::<T>,
         detach: detach_structured_clone_object::<T>,
@@ -551,8 +586,20 @@ impl StructuredCloneRegistry {
 }
 
 pub struct StructuredCloneRegistryTransferData {
+  is_exposed: IsExposedHandler,
   receive: ReceiveTransferHandler,
   data: Box<dyn Any>,
+}
+
+fn structured_clone_host_object_is_exposed<
+  's,
+  'i,
+  T: StructuredCloneHostObject,
+>(
+  scope: &mut v8::PinScope<'s, 'i>,
+  target_realm: v8::Local<'s, v8::Context>,
+) -> bool {
+  T::is_exposed(scope, target_realm)
 }
 
 fn registered_type_matches<T: GarbageCollected + 'static>(
@@ -581,6 +628,7 @@ fn transfer_registered_host_object<'s, 'i, T: StructuredCloneTransferable>(
   object: v8::Local<'s, v8::Object>,
 ) -> Result<StructuredCloneRegistryTransferData, JsErrorBox> {
   Ok(StructuredCloneRegistryTransferData {
+    is_exposed: structured_clone_host_object_is_exposed::<T>,
     receive: receive_registered_host_object::<T>,
     data: Box::new(transfer_structured_clone_host_object::<T>(scope, object)?),
   })
@@ -655,10 +703,27 @@ impl StructuredCloneHostObjectRegistry for StructuredCloneRegistry {
   ) -> Option<v8::Local<'s, v8::Object>> {
     let tag = *deserializer.read_raw_bytes(1)?.first()?;
     match self.inner.handlers_by_tag[tag as usize]? {
-      HostObjectTagHandler::Serialized(read) => {
+      //
+      // StructuredDeserialize step 22.2.
+      // V8 owns the recursive traversal, so the exposure check is performed
+      // when its host-object callback reaches the serializable platform object.
+      // https://html.spec.whatwg.org/multipage/structured-data.html#structureddeserialize
+      //
+      HostObjectTagHandler::Serialized { read, is_exposed } => {
+        if !is_exposed(scope, context) {
+          throw_interface_not_exposed(scope);
+          return None;
+        }
         read(scope, context, deserializer, wire_format_version)
       }
-      HostObjectTagHandler::Transferred(matches) => {
+      HostObjectTagHandler::Transferred {
+        matches,
+        is_exposed,
+      } => {
+        if !is_exposed(scope, context) {
+          throw_interface_not_exposed(scope);
+          return None;
+        }
         let mut transfer_id = 0;
         if !deserializer.read_uint32(&mut transfer_id) {
           return None;
@@ -741,14 +806,28 @@ impl StructuredCloneHostObjectRegistry for StructuredCloneRegistry {
   fn receive_host_object<'s, 'i>(
     &self,
     scope: &mut v8::PinScope<'s, 'i>,
+    target_realm: v8::Local<'s, v8::Context>,
     data: Self::TransferData,
   ) -> Result<v8::Local<'s, v8::Object>, JsErrorBox> {
-    // TODO:
-    // 4.2. If the interface identified by interfaceName is not exposed in targetRealm,
-    // then throw a "DataCloneError" DOMException.
+    // 4.2.
     // https://html.spec.whatwg.org/multipage/structured-data.html#structureddeserializewithtransfer
-    // https://source.chromium.org/chromium/chromium/src/+/main:third_party/blink/renderer/bindings/core/v8/serialization/v8_script_value_deserializer.cc;l=1041-1120?q=ExecutionContextExposesInterface&ss=chromium%2Fchromium%2Fsrc
+    if !(data.is_exposed)(scope, target_realm) {
+      return Err(data_clone_error(
+        "Interface is not exposed in the target realm",
+      ));
+    }
     (data.receive)(scope, data.data)
+  }
+}
+
+fn throw_interface_not_exposed(scope: &mut v8::PinScope<'_, '_>) {
+  // TODO: Throw a DataCloneError DOMException rather than a plain V8 Error.
+  // deno_core cannot directly construct the DOMException provided by deno_web.
+  if let Some(message) =
+    v8::String::new(scope, "Interface is not exposed in the target realm")
+  {
+    let error = v8::Exception::error(scope, message);
+    scope.throw_exception(error);
   }
 }
 
@@ -799,6 +878,13 @@ where
     object: v8::Local<'s, v8::Object>,
     serializer: &dyn v8::ValueSerializerHelper,
   ) -> Option<bool> {
+    // TODO:
+    // Need to check detached.
+    // https://html.spec.whatwg.org/multipage/structured-data.html#structuredserializeinternal
+    //
+    // 19.1.
+    // Otherwise, if value is a platform object that is a serializable object:
+    // If value has a [[Detached]] internal slot whose value is true, then throw a "DataCloneError" DOMException.
     let context = v8::Local::new(scope, &self.context);
     let transfer_id = self.transferred_host_object_ids.as_ref().and_then(
       |transferred_host_object_ids| {
@@ -945,7 +1031,15 @@ where
 /// This abstract operation needs recursible. So almost operation should
 /// delegate to [`v8::ValueSerializerImpl`]
 ///
+/// e.g,
+///
+/// 19.1. If value has a [[Detached]] internal slot whose value is true,
+/// then throw a "DataCloneError" DOMException.
 /// https://html.spec.whatwg.org/multipage/structured-data.html#structuredserializeinternal
+///
+/// This operation must be implemented within a function that overrides [`v8::ValueSerializerImpl::write_host_object`]
+/// function, which is called recursively according to the object graph.
+/// https://source.chromium.org/chromium/chromium/src/+/main:third_party/blink/renderer/bindings/core/v8/serialization/v8_script_value_serializer.cc;l=499-504
 pub fn structured_serialize_internal<'s, 'i, R>(
   scope: &mut v8::PinScope<'s, 'i>,
   value: v8::Local<'s, v8::Value>,
@@ -1178,7 +1272,20 @@ where
   Ok(serializer.release())
 }
 
-// https://html.spec.whatwg.org/multipage/structured-data.html#structureddeserialize
+/// Not a few operation is handled by V8 side.
+/// https://source.chromium.org/chromium/chromium/src/+/main:v8/src/objects/value-serializer.cc
+/// This abstract operation needs recursible. So almost operation should
+/// delegate to [`v8::ValueDeserializerImpl`]
+///
+/// e.g,
+///
+/// 22.2. If the interface identified by interfaceName is not exposed in targetRealm,
+/// then throw a "DataCloneError" DOMException.
+/// https://html.spec.whatwg.org/multipage/structured-data.html#structureddeserialize
+///
+/// This operation must be implemented within a function that overrides [`v8::ValueDeserializerImpl::read_host_object`]
+/// function, which is called recursively according to the object graph.
+/// https://source.chromium.org/chromium/chromium/src/+/main:third_party/blink/renderer/bindings/core/v8/serialization/v8_script_value_deserializer.cc;l=1054-1131
 pub fn structured_deserialize<'s, 'i, R>(
   scope: &mut v8::PinScope<'s, 'i>,
   serialized: Vec<u8>,
@@ -1233,7 +1340,8 @@ where
       }
       // 4.
       StructuredCloneTransferData::HostObject(data) => {
-        let object = host_objects.receive_host_object(scope, data)?;
+        let object =
+          host_objects.receive_host_object(scope, target_realm, data)?;
         transferred_host_objects.push(object);
         transferred_values.push(object.into());
       }
@@ -1267,12 +1375,6 @@ fn deserialize_v8_graph<'s, 'i, R>(
 where
   R: StructuredCloneHostObjectRegistry,
 {
-  // TODO:
-  // 22.2. If the interface identified by interfaceName is not exposed in targetRealm,
-  // then throw a "DataCloneError" DOMException.
-  // https://html.spec.whatwg.org/multipage/structured-data.html#structureddeserialize
-  // https://source.chromium.org/chromium/chromium/src/+/main:third_party/blink/renderer/bindings/core/v8/serialization/v8_script_value_deserializer.cc;l=1041-1120?q=ExecutionContextExposesInterface&ss=chromium%2Fchromium%2Fsrc
-
   let (wire_format_version, bytes) = read_embedder_envelope(bytes)?;
   if wire_format_version == 0
     || wire_format_version > host_objects.wire_format_version()
@@ -1443,6 +1545,10 @@ mod registry_tests {
   use super::*;
   use crate::JsRuntime;
 
+  thread_local! {
+    static TEST_TRANSFERABLE_IS_EXPOSED: Cell<bool> = const { Cell::new(true) };
+  }
+
   struct TestTransferable {
     value: u32,
     detached: Cell<bool>,
@@ -1492,6 +1598,15 @@ mod registry_tests {
   }
 
   impl StructuredCloneHostObject for TestTransferable {
+    fn is_exposed<'s, 'i>(
+      _scope: &mut v8::PinScope<'s, 'i>,
+      _target_realm: v8::Local<'s, v8::Context>,
+    ) -> bool {
+      TEST_TRANSFERABLE_IS_EXPOSED.get()
+    }
+  }
+
+  impl StructuredCloneSerializable for TestTransferable {
     fn write_structured_clone_payload<'s, 'i>(
       &self,
       _scope: &mut v8::PinScope<'s, 'i>,
@@ -1638,5 +1753,70 @@ mod registry_tests {
       assert_eq!(cloned_value.value, expected);
       assert!(!cloned_value.detached.get());
     }
+  }
+
+  #[test]
+  fn rejects_host_object_not_exposed_in_target_realm() {
+    const SERIALIZABLE_TAG: u8 = b'}';
+    const TRANSFERABLE_TAG: u8 = b'~';
+
+    let mut runtime = JsRuntime::new(Default::default());
+    deno_core::scope!(scope, runtime);
+    let context = scope.get_current_context();
+    let mut registry = StructuredCloneRegistry::new();
+    registry.register_serializable_transferable::<TestTransferable>(
+      SERIALIZABLE_TAG,
+      TRANSFERABLE_TAG,
+    );
+
+    let serializable = crate::cppgc::make_cppgc_object(
+      scope,
+      TestTransferable {
+        value: 42,
+        detached: Cell::new(false),
+      },
+    );
+    let serialized = structured_serialize_internal(
+      scope,
+      serializable.into(),
+      false,
+      &registry,
+    )
+    .unwrap();
+
+    let transferable = crate::cppgc::make_cppgc_object(
+      scope,
+      TestTransferable {
+        value: 43,
+        detached: Cell::new(false),
+      },
+    );
+    let transferred = structured_serialize_with_transfer(
+      scope,
+      transferable.into(),
+      &[transferable.into()],
+      &registry,
+    )
+    .unwrap();
+
+    TEST_TRANSFERABLE_IS_EXPOSED.set(false);
+    {
+      v8::tc_scope!(let tc_scope, scope);
+      assert!(
+        structured_deserialize(tc_scope, serialized, context, &registry)
+          .is_err()
+      );
+      assert!(tc_scope.has_caught());
+    }
+    assert!(
+      structured_deserialize_with_transfer(
+        scope,
+        transferred,
+        context,
+        &registry,
+      )
+      .is_err()
+    );
+    TEST_TRANSFERABLE_IS_EXPOSED.set(true);
   }
 }
