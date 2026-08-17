@@ -6,21 +6,18 @@
 //! does not correspond one-to-one with the steps in the WHATWG spec.
 //!
 //! Recursive serialization and deserialization of ECMAScript built-in object
-//! graphs is delegated to [v8::ValueSerializer] and [v8::ValueDeserializer]. This
-//! preserves cycles, shared references, and V8's representation of built-ins
+//! graphs is delegated to [v8::ValueSerializer] and [v8::ValueDeserializer].
+//! This preserves cycles, shared references, and V8's representation of built-ins
 //! such as Array, Map, Set, Date, and more.
 //!
-//! Deno should implements platform(host) objects that V8 does not know about.
-//! It includes Web platform objects such as Blob is [Serializable] or
-//! OffscreenCanvas is [Transferable].
-//! Delegates implementing [v8::ValueSerializerImpl] and [v8::ValueDeserializerImpl]
-//! detect, serialize, and deserialize these platform objects within an object graph.
+//! The JavaScript Host platform of Deno should implements host(platform) objects
+//! that V8 does not know about.
+//! It includes host objects such as Blob is a [Serializable] interface or
+//! OffscreenCanvas is a [Transferable] interface, and more.
 //!
-//! TODO: do not needed to document
-//! Transfer list validation, transferability checks, ownership transfer, and
-//! detachment belong to the outer implementation of WHATWG
-//! StructuredSerializeWithTransfer. The V8 serializer receives the transfer
-//! state prepared by that layer.
+//! To achieve this, it helps to understand beforehand how the JS Host
+//! should override the behavior of the V8 serializer/deserializer.
+//! https://source.chromium.org/chromium/chromium/src/+/main:v8/include/v8-value-serializer.h
 
 use std::any::Any;
 use std::any::TypeId;
@@ -60,30 +57,35 @@ pub struct StructuredDeserializeWithTransferResult<'s> {
 // https://source.chromium.org/chromium/chromium/src/+/main:third_party/blink/renderer/bindings/core/v8/serialization/v8_script_value_deserializer.cc
 // https://source.chromium.org/chromium/chromium/src/+/main:third_party/blink/renderer/bindings/core/v8/serialization/serialization_tag.h
 
-// Deno wraps V8's serialized data in an embedder-controlled version envelope:
-//
-//   0xFE | wire format version:uint32(varint) | V8 header | V8 payload
-//
-// The outer version covers Deno host-object tags and payloads, while the inner
-// V8 header carries V8's independently versioned wire format. The envelope is
-// consumed before constructing the V8 deserializer. The single-byte marker is
-// distinct from V8's 0xFF version header. Increment the registry's version
-// whenever an existing Deno payload changes incompatibly.
+/// Deno wraps V8's serialized data in an embedder-controlled version envelope:
+///
+///   0xFE | wire format version:uint32(varint) | V8 header | V8 payload
+///
+/// The outer version covers Deno host-object tags and payloads, while the inner
+/// V8 header carries V8's independently versioned wire format. The envelope is
+/// consumed before constructing the V8 deserializer. The single-byte marker is
+/// distinct from V8's 0xFF version header.
 const EMBEDDER_ENVELOPE_TAG: u8 = 0xFE;
 
+/// Increment this for each incompatible change to the wire format.
+///
 /// Version of the Deno-controlled structured-clone envelope and host-object
-/// payloads. Persisted structured-clone data must remain readable by newer
-/// runtimes, so this is owned by the serialization layer rather than a Web API
-/// implementation.
-pub const STRUCTURED_CLONE_WIRE_FORMAT_VERSION: u32 = 1;
+/// payloads.
+/// It must keep
+/// Persisted structured-clone data must remain readable by newer
+/// runtimes.
+/// https://source.chromium.org/chromium/chromium/src/+/main:third_party/blink/renderer/bindings/core/v8/serialization/serialized_script_value.h;l=118-153
+pub const WIRE_FORMAT_VERSION: u32 = 1;
 
 // Host-object tags are written as exactly one raw byte before the type-specific
-// payload. Values are permanent wire identifiers: never renumber, reorder by
-// implicit discriminant, or reuse a retired value.
+// payload.
+// Values are permanent wire identifiers:
+//
+// Never renumber, reorder by implicit discriminant, or reuse a retired value.
 // https://source.chromium.org/chromium/chromium/src/+/main:third_party/blink/renderer/bindings/core/v8/serialization/serialization_tag.h
 #[derive(Clone, Copy, Eq, Hash, PartialEq)]
 #[repr(u8)]
-pub enum StructuredCloneHostObjectTag {
+pub enum SerializationTag {
   /// Serializing order:
   ///
   /// settings of ImageDataSerializationTag: u32,
@@ -92,6 +94,11 @@ pub enum StructuredCloneHostObjectTag {
   /// height: u32,
   /// data: V8-serialized Uint8ClampedArray/Float16Array
   ImageData = b'#',
+  /// offset: u64 (fixed width, network order) from buffer start
+  /// size: u32 (fixed width, network order)
+  TrailerOffset = 0xFE,
+  /// version: u32 -> Uses this as the file version.
+  Version = 0xFF,
 }
 
 // V8's WriteUint32 uses a base-128 varint: each byte contributes seven value
@@ -597,7 +604,7 @@ impl StructuredCloneHostObjectRegistry for StructuredCloneRegistry {
   type TransferData = StructuredCloneRegistryTransferData;
 
   fn wire_format_version(&self) -> u32 {
-    STRUCTURED_CLONE_WIRE_FORMAT_VERSION
+    WIRE_FORMAT_VERSION
   }
 
   fn is_host_object<'s, 'i>(

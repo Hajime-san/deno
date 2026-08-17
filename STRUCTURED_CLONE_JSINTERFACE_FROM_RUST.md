@@ -113,7 +113,7 @@ private-brand の JS host object を扱うには、CppGC handler と別に次の
 
 ```rust
 registry.register_js_serializable(
-  StructuredCloneHostObjectTag::Blob as u8,
+  SerializationTag::Blob as u8,
   "Blob",
   write_blob_payload,
   read_blob_payload,
@@ -128,7 +128,7 @@ serialize: object --is_branded("Blob")--> Blob write handler --tag + payload-->
 deserialize: tag ------------------------> Blob read handler ---------------> object
 ```
 
-`StructuredCloneHostObjectTag` は永続的な wire identifier である。Blob 用 tag を追加
+`SerializationTag` は永続的な wire identifier である。Blob 用 tag を追加
 する場合は値を明示して予約し、既存の tag を再利用・再採番しない。payload の互換性
 方針と fixture は `libs/core/serialization/README.md` に従う。
 

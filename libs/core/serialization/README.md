@@ -13,7 +13,7 @@ There are three independent identifiers:
 
 | Identifier                                  | Owner | Purpose                                                                      |
 | ------------------------------------------- | ----- | ---------------------------------------------------------------------------- |
-| `STRUCTURED_CLONE_WIRE_FORMAT_VERSION`      | Deno  | The `0xFE` envelope, host-object tags, and Deno host-object payload schemas. |
+| `WIRE_FORMAT_VERSION`      | Deno  | The `0xFE` envelope, host-object tags, and Deno host-object payload schemas. |
 | V8 serializer header version                | V8    | The format for ECMAScript built-ins and nested V8 values.                    |
 | Host-object registry tag                    | Deno  | A permanent identifier for one host-object representation.                   |
 
@@ -32,7 +32,7 @@ For example, `ImageData` writes a Deno-defined payload after its registered
 tag's payload would make a current decoder interpret a valid older payload
 differently. Then do all of the following:
 
-1. Increment `STRUCTURED_CLONE_WIRE_FORMAT_VERSION`.
+1. Increment `WIRE_FORMAT_VERSION`.
 2. Add a decoder branch for the previous version in the host object's
    `read_structured_clone_payload` implementation.
 3. Keep every existing fixture and its decode test.
@@ -58,7 +58,7 @@ unless their full encoded shape can be safely skipped.
 ## Updating V8
 
 When only V8's serializer header version changes, leave
-`STRUCTURED_CLONE_WIRE_FORMAT_VERSION` unchanged. Add a new current encoder
+`WIRE_FORMAT_VERSION` unchanged. Add a new current encoder
 fixture whose name includes the new V8 version, and retain older fixtures as
 decode tests. Bump the Deno envelope version only when Deno-controlled bytes
 (need versioned decoding to preserve the interpretation of older payloads).

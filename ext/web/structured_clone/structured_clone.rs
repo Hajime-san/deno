@@ -3,7 +3,7 @@
 #[cfg(test)]
 use std::sync::OnceLock;
 
-use deno_core::StructuredCloneHostObjectTag;
+use deno_core::SerializationTag;
 #[cfg(test)]
 use deno_core::StructuredCloneRegistry;
 #[cfg(test)]
@@ -23,7 +23,7 @@ use crate::image_data::ImageData;
 fn create_web_structured_clone_registry() -> StructuredCloneRegistry {
   let mut registry = StructuredCloneRegistry::new();
   registry.register_serializable::<ImageData>(
-    StructuredCloneHostObjectTag::ImageData as u8,
+    SerializationTag::ImageData as u8,
   );
   registry
 }
