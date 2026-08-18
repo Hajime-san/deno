@@ -1408,6 +1408,10 @@ where
 }
 
 fn read_embedder_envelope(bytes: &[u8]) -> Result<(u32, &[u8]), JsErrorBox> {
+  // FIXME:
+  // keep backward-compatibility for the permanent external data
+  // which handled by Deno.kv (core.serialize/core.derserialize)
+  // ext/kv/01_db.ts
   if bytes.first() != Some(&EMBEDDER_ENVELOPE_TAG) {
     return Err(JsErrorBox::range_error(
       "Cannot deserialize structured clone magic",
